@@ -1,0 +1,355 @@
+/*
+ * 融合的 CONV2D + bias + DP4A 修正 + RESCALE(+LUT)。
+ *
+ * 依据 ai-ml-emulation-layer-for-vulkan/graph/shaders/graph_op/tosa/ 的 TOSA 语义：
+ *   acc[o] = Σ (q_a − z_a)(q_w − z_w) + bias[o]        z_w = 0（权重对称）
+ *           = Σ q_a·q_w − z_a·Σ_all q_w                后一项逐输出通道是常量（corr）
+ *   越界 tap 贡献 0 ⇒ 激活缓冲区四周用 z_a(−128, 0x80) 预填充，与「跳过 tap」严格等价。
+ *
+ *   重量化（RESCALE，SINGLE_ROUND）：
+ *     r = (acc · multiplier + (1 << (shift−1))) >> shift   ← 算术右移
+ *     r = clamp(r + out_zp, −128, 127)
+ *   out_zp = −128 时钳位后恒非负 —— 即隐含的 ReLU，不要再额外 max(x,0)。
+ *
+ * 激活按 NHWC 存成 uint32 视图：word[d] 的低字节是通道 4d。
+ * 因而「4 个连续通道」= 一次 uint32 读写，与 OpSDot 的 4x8 打包天然一致。
+ *
+ * 权重布局 packed_w[oc][K/4]，K/4 = (kh·kw·Cin)/4，K 方向按 (ky,kx,ic) 排列。
+ *
+ * ★★ 性能改动（2026-10-01）★★
+ * 每个线程负责 OCG 个 oc4 组（OCG×4 个输出通道），而不是原来的 1 组（4 通道）。
+ *
+ * 原因：原实现有 out_c4 个 z 切片，每个切片都把同一 3×3×Cin 邻域重新装载一遍
+ * —— out_c4=8 时同一批激活被读 8 次。per-dispatch 实测显示 kernel 只跑到
+ * 硬件点积峰值的 ~1/25、有效带宽 ~8%，指令数估算也落在 LSU/取指上。
+ * 让每线程多算几组后，激活装载指令数降到 1/OCG，权重仍走共享内存复用。
+ *
+ * OCG 必须与 DLL 侧的 CONV_OCG 一致（那边用它把 dispatch 的 gz 除以 OCG）。
+ */
+
+#version 450
+#extension GL_EXT_spirv_intrinsics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// glslang 15.4 不认 GL_EXT_shader_integer_dot_product，只能用 spirv_intrinsics 直接声明 OpSDot。
+// 省略 Packed Vector Format 操作数（运行时验证过与显式指定等价）。
+spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6018], id = 4450)
+int spv_sdot(uint v1, uint v2);
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+/* 每线程负责的 oc4 组数（4 组 = 16 个输出通道）。与 DLL 的 CONV_OCG 必须一致。 */
+#define OCG 4u
+
+/*
+ * ── CONV_2X2 变体（2026-10-01）────────────────────────────────────────────
+ * 每线程处理 2×2 个输出像素，专为「输出通道极少」（out_c4 == 1，即 cout=4）的
+ * 全分辨率层（NSS HIGH 的 temporal 末层 op32）设计。该层原内核每线程只产出
+ * 1 word、做 576 MAC，固定开销（激活重读 + 启动）占比过高，实测仅 ~94GB/s。
+ *
+ * 结构：workgroup（8×8=64 线程）协作把 2×2 像素块的 4×4 tap 窗口 × in_c4
+ * 一次性载入 shared（每线程约 1 word，全局激活读 ≈ 原来的 1/64），
+ * 然后各线程算自己的 2×2 像素。累加顺序保持 (ky,kx,ic4) —— 与原内核逐位一致。
+ *
+ * 约束（DLL 侧选路保证）：strideH == strideW == 1、in_c4 ≤ 8、out_c4 == 1。
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+#ifdef CONV_2X2
+shared uint sTap[4 * 4 * 8];   // 4×4 窗口 × in_c4(≤8)，op32 用 64 word（256B）
+#endif
+
+layout(push_constant) uniform PC {
+    uint in_w;          // 输入内部宽（不含边框）
+    uint in_c4;         // Cin / 4
+    uint out_h;
+    uint out_w;
+    uint out_c4;        // Cout / 4
+    int  pad_top;
+    int  pad_left;
+    uint stride_h;
+    uint stride_w;
+    int  out_zp;
+    uint kh;
+    uint kw;
+    uint has_lut;
+    uint dbg;           // 非 0 时把原始 int32 累加器写到 binding 7
+    uint inH;           // 输入内部高（inBorded=0 时用于越界判定）
+    uint inBorded;      // 1=带 1px 边框的内部缓冲；0=宿主紧致缓冲（越界 tap 用 z_a 填充代替）
+    uint outBorded;     // 1=写带边框的内部缓冲；0=直接写宿主紧致缓冲（省掉输出回拷）
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer ActIn  { uint d[]; } actIn;
+layout(set = 0, binding = 1) readonly  buffer WPk    { uint d[]; } wPk;
+layout(set = 0, binding = 2) readonly  buffer BiasCr { int  d[]; } biasCr;   // bias + 修正项
+layout(set = 0, binding = 3) readonly  buffer Mult   { int  d[]; } mult;
+layout(set = 0, binding = 4) readonly  buffer Shift  { int  d[]; } shiftB;
+layout(set = 0, binding = 5) readonly  buffer Lut    { int  d[]; } lut;
+layout(set = 0, binding = 6) writeonly buffer ActOut { uint d[]; } actOut;
+layout(set = 0, binding = 7) writeonly buffer Dbg    { int  d[]; } dbgBuf;
+
+/*
+ * ★ 权重不再放共享内存（实验 A）：
+ * 权重索引 wOff+ic4 在整个 warp 内是同一个地址 ⇒ 全局读即广播（1 次事务）+ L1 命中，
+ * 共享暂存省不下什么，却占掉 10 KiB 共享内存把占用率压到 ~31%（10 个 workgroup/SM）。
+ * 直接读全局同时省掉「协作载入 + barrier」的固定开销。
+ */
+
+/* 4 个输出通道的打包输出（bias → rescale → +zp → clamp → LUT）。 */
+uint packOut(int accs[4], int oc0) {
+    uint packed = 0u;
+    for (int j = 0; j < 4; ++j) {
+        int oc = oc0 + j;
+        int v  = accs[j] + biasCr.d[oc];
+        int sh = shiftB.d[oc];
+        // 64 位：acc 约 25 位 × multiplier 最大 31 位，乘积可达 56 位
+        int64_t r = (int64_t(v) * int64_t(mult.d[oc]) + (int64_t(1) << (sh - 1))) >> sh;
+        r += int64_t(pc.out_zp);
+        r  = clamp(r, int64_t(-128), int64_t(127));
+        int q  = int(r);
+        if (pc.has_lut != 0u) {
+            q = lut.d[q + 128];
+        }
+        packed |= (uint(q) & 0xFFu) << (uint(j) * 8u);
+    }
+    return packed;
+}
+
+#ifdef CONV_2X2
+/* 2×2 像素/线程变体：见文件头说明。约束：stride==1、in_c4≤8、out_c4≤OCG。 */
+void conv2x2Main() {
+    const uint ox0 = gl_GlobalInvocationID.x * 2u;
+    const uint oy0 = gl_GlobalInvocationID.y * 2u;
+    const uint oc4Base = gl_GlobalInvocationID.z * OCG;
+
+    uint groups = pc.out_c4 - oc4Base;
+    if (groups > OCG) groups = OCG;
+    if (ox0 >= pc.out_w || oy0 >= pc.out_h || groups == 0u) return;
+
+    const uint inStride = (pc.in_w + 2u) * pc.in_c4;
+    const uint tid   = gl_LocalInvocationID.y * 8u + gl_LocalInvocationID.x;
+    const uint nTapW = 16u * pc.in_c4;
+
+    /* 窗口左上角 = 像素 (oy0,ox0) 的第一个 tap。
+     * 统一按内部坐标判定越界（尾块时 4×4 窗口会伸出 1~2 行/列）：越界 tap
+     * 取 z_a(0x80808080)，与带边框缓冲的边框值语义严格等价 ⇒ 逐位一致。
+     * 内部高 = out_h（本变体约束 stride==1 ⇒ in_h == out_h）。 */
+    const int y0 = int(oy0) - pc.pad_top;
+    const int x0 = int(ox0) - pc.pad_left;
+    for (uint i = tid; i < nTapW; i += 64u) {
+        const uint t    = i / pc.in_c4;
+        const uint ic4  = i - t * pc.in_c4;
+        const uint ty   = t >> 2u;
+        const uint tx   = t & 3u;
+        const int tyi   = y0 + int(ty);
+        const int txi   = x0 + int(tx);
+        uint v = 0x80808080u;
+        if (tyi >= 0 && tyi < int(pc.out_h) && txi >= 0 && txi < int(pc.in_w)) {
+            if (pc.inBorded != 0u) {
+                v = actIn.d[uint(tyi + 1) * inStride
+                          + uint(txi + 1) * pc.in_c4 + ic4];
+            } else {
+                v = actIn.d[uint(tyi) * (pc.in_w * pc.in_c4)
+                          + uint(txi) * pc.in_c4 + ic4];
+            }
+        }
+        sTap[i] = v;
+    }
+    barrier();
+
+    /* 4 个像素（py*2+px）× 4 个输出通道 的累加器。累加顺序 (ky,kx,ic4)
+     * 与原内核完全一致 ⇒ 逐位一致。tap 窗口坐标 = (py+ky, px+kx)。 */
+    int acc00[4], acc01[4], acc10[4], acc11[4];
+    acc00[0]=0; acc00[1]=0; acc00[2]=0; acc00[3]=0;
+    acc01[0]=0; acc01[1]=0; acc01[2]=0; acc01[3]=0;
+    acc10[0]=0; acc10[1]=0; acc10[2]=0; acc10[3]=0;
+    acc11[0]=0; acc11[1]=0; acc11[2]=0; acc11[3]=0;
+    const uint K4     = pc.kh * pc.kw * pc.in_c4;
+    const uint wBase0 = oc4Base * 4u * K4;
+
+    for (uint ky = 0u; ky < pc.kh; ++ky) {
+        for (uint kx = 0u; kx < pc.kw; ++kx) {
+            const uint wOff = (ky * pc.kw + kx) * pc.in_c4;
+            for (uint ic4 = 0u; ic4 < pc.in_c4; ++ic4) {
+                const uint b  = wOff + ic4;
+                const uint a00 = sTap[((0u + ky) * 4u + (0u + kx)) * pc.in_c4 + ic4];
+                const uint a01 = sTap[((0u + ky) * 4u + (1u + kx)) * pc.in_c4 + ic4];
+                const uint a10 = sTap[((1u + ky) * 4u + (0u + kx)) * pc.in_c4 + ic4];
+                const uint a11 = sTap[((1u + ky) * 4u + (1u + kx)) * pc.in_c4 + ic4];
+                if (groups > 0u) {
+                    acc00[0] += spv_sdot(a00, wPk.d[wBase0 + b]);
+                    acc00[1] += spv_sdot(a00, wPk.d[wBase0 + b + K4]);
+                    acc00[2] += spv_sdot(a00, wPk.d[wBase0 + b + 2u * K4]);
+                    acc00[3] += spv_sdot(a00, wPk.d[wBase0 + b + 3u * K4]);
+                    acc01[0] += spv_sdot(a01, wPk.d[wBase0 + b]);
+                    acc01[1] += spv_sdot(a01, wPk.d[wBase0 + b + K4]);
+                    acc01[2] += spv_sdot(a01, wPk.d[wBase0 + b + 2u * K4]);
+                    acc01[3] += spv_sdot(a01, wPk.d[wBase0 + b + 3u * K4]);
+                    acc10[0] += spv_sdot(a10, wPk.d[wBase0 + b]);
+                    acc10[1] += spv_sdot(a10, wPk.d[wBase0 + b + K4]);
+                    acc10[2] += spv_sdot(a10, wPk.d[wBase0 + b + 2u * K4]);
+                    acc10[3] += spv_sdot(a10, wPk.d[wBase0 + b + 3u * K4]);
+                    acc11[0] += spv_sdot(a11, wPk.d[wBase0 + b]);
+                    acc11[1] += spv_sdot(a11, wPk.d[wBase0 + b + K4]);
+                    acc11[2] += spv_sdot(a11, wPk.d[wBase0 + b + 2u * K4]);
+                    acc11[3] += spv_sdot(a11, wPk.d[wBase0 + b + 3u * K4]);
+                }
+            }
+        }
+    }
+
+    /* 输出：与原内核相同的布局与量化路径；奇数宽高的越界像素跳过写。 */
+    for (uint py = 0u; py < 2u; ++py) {
+        const uint oy = oy0 + py;
+        if (oy >= pc.out_h) break;
+        for (uint px = 0u; px < 2u; ++px) {
+            const uint ox = ox0 + px;
+            if (ox >= pc.out_w) break;
+            const uint outBase = (pc.outBorded == 0u)
+                    ? (oy * pc.out_w + ox) * pc.out_c4
+                    : ((oy + 1u) * (pc.out_w + 2u) * pc.out_c4
+                       + (ox + 1u) * pc.out_c4);
+            for (uint g = 0u; g < groups; ++g) {
+                const int oc0 = int(oc4Base + g) * 4;
+                if (py == 0u && px == 0u) {
+                    actOut.d[outBase + oc4Base + g] = packOut(acc00, oc0);
+                } else if (py == 0u) {
+                    actOut.d[outBase + oc4Base + g] = packOut(acc01, oc0);
+                } else if (px == 0u) {
+                    actOut.d[outBase + oc4Base + g] = packOut(acc10, oc0);
+                } else {
+                    actOut.d[outBase + oc4Base + g] = packOut(acc11, oc0);
+                }
+            }
+        }
+    }
+}
+#endif
+
+void main() {
+#ifdef CONV_2X2
+    conv2x2Main();
+    return;
+#endif
+    uint ox  = gl_GlobalInvocationID.x;
+    uint oy  = gl_GlobalInvocationID.y;
+    uint oc4Base = gl_GlobalInvocationID.z * OCG;
+
+    const uint K4     = pc.kh * pc.kw * pc.in_c4;
+    const uint wBase0 = oc4Base * 4u * K4;
+
+    /* 本线程实际要算的组数：尾块可能不足 OCG。同一 workgroup 内取值一致（只依赖 z）。 */
+    uint groups = OCG;
+    if (pc.out_c4 < oc4Base + OCG) {
+        groups = pc.out_c4 - oc4Base;
+    }
+    const uint wWords = groups * 4u * K4;
+
+    if (ox >= pc.out_w || oy >= pc.out_h || oc4Base >= pc.out_c4 || groups == 0u) {
+        return;
+    }
+
+    const uint inStride = (pc.in_w + 2u) * pc.in_c4;        // 以 uint32 为单位
+
+    int a00 = 0, a01 = 0, a02 = 0, a03 = 0;
+    int a10 = 0, a11 = 0, a12 = 0, a13 = 0;
+    int a20 = 0, a21 = 0, a22 = 0, a23 = 0;
+    int a30 = 0, a31 = 0, a32 = 0, a33 = 0;
+
+    for (uint ky = 0u; ky < pc.kh; ++ky) {
+        // 边框占 1 个像素，所以内部坐标 iy 对应缓冲区坐标 iy+1
+        int py = int(oy) * int(pc.stride_h) - pc.pad_top + int(ky) + 1;
+        for (uint kx = 0u; kx < pc.kw; ++kx) {
+            int px = int(ox) * int(pc.stride_w) - pc.pad_left + int(kx) + 1;
+            /* inBorded=0：直接读宿主的紧致缓冲，越界 tap 用 z_a 填充代替。
+             * z_a = -128 = 0x80 ⇒ (q_a − z_a) = 0，与「读边框值」和「跳过 tap」都严格等价，
+             * 所以结果与带边框路径逐位一致，只是省掉了整份输入镜像拷贝（实测占 19%）。 */
+            uint aBase;
+            bool tapOut = false;
+            if (pc.inBorded == 0u) {
+                int ty = py - 1;
+                int tx = px - 1;
+                tapOut = (ty < 0 || ty >= int(pc.inH) || tx < 0 || tx >= int(pc.in_w));
+                aBase  = uint(ty) * (pc.in_w * pc.in_c4) + uint(tx) * pc.in_c4;
+            } else {
+                aBase = uint(py) * inStride + uint(px) * pc.in_c4;
+            }
+            uint wOff  = (ky * pc.kw + kx) * pc.in_c4;
+            for (uint ic4 = 0u; ic4 < pc.in_c4; ++ic4) {
+                // 一次装载，给 OCG 组复用 —— 这正是本次优化的核心
+                uint a = tapOut ? 0x80808080u : actIn.d[aBase + ic4];
+                if (groups > 0u) {
+                    uint b = wOff + ic4;
+                    a00 += spv_sdot(a, wPk.d[wBase0 + b]);
+                    a01 += spv_sdot(a, wPk.d[wBase0 + b + K4]);
+                    a02 += spv_sdot(a, wPk.d[wBase0 + b + 2u * K4]);
+                    a03 += spv_sdot(a, wPk.d[wBase0 + b + 3u * K4]);
+                }
+                if (groups > 1u) {
+                    uint b = 4u * K4 + wOff + ic4;
+                    a10 += spv_sdot(a, wPk.d[wBase0 + b]);
+                    a11 += spv_sdot(a, wPk.d[wBase0 + b + K4]);
+                    a12 += spv_sdot(a, wPk.d[wBase0 + b + 2u * K4]);
+                    a13 += spv_sdot(a, wPk.d[wBase0 + b + 3u * K4]);
+                }
+                if (groups > 2u) {
+                    uint b = 8u * K4 + wOff + ic4;
+                    a20 += spv_sdot(a, wPk.d[wBase0 + b]);
+                    a21 += spv_sdot(a, wPk.d[wBase0 + b + K4]);
+                    a22 += spv_sdot(a, wPk.d[wBase0 + b + 2u * K4]);
+                    a23 += spv_sdot(a, wPk.d[wBase0 + b + 3u * K4]);
+                }
+                if (groups > 3u) {
+                    uint b = 12u * K4 + wOff + ic4;
+                    a30 += spv_sdot(a, wPk.d[wBase0 + b]);
+                    a31 += spv_sdot(a, wPk.d[wBase0 + b + K4]);
+                    a32 += spv_sdot(a, wPk.d[wBase0 + b + 2u * K4]);
+                    a33 += spv_sdot(a, wPk.d[wBase0 + b + 3u * K4]);
+                }
+            }
+        }
+    }
+
+    /* 调试通道：只在第一组（等价于原来的 oc4==0）输出原始累加器。 */
+    if (pc.dbg != 0u && oc4Base == 0u && groups > 0u) {
+        const uint dbgBase = (uint(oy) * pc.out_w + uint(ox)) * 24u;
+        int accs[4] = int[4](a00, a01, a02, a03);
+        for (int j = 0; j < 4; ++j) {
+            int  oo  = j;
+            int  vv  = accs[j] + biasCr.d[oo];
+            int  sh  = shiftB.d[oo];
+            int64_t rr = (int64_t(vv) * int64_t(mult.d[oo])
+                          + (int64_t(1) << (sh - 1))) >> sh;
+            int64_t qq = rr + int64_t(pc.out_zp);
+            qq = clamp(qq, int64_t(-128), int64_t(127));
+            dbgBuf.d[dbgBase + uint(j) * 6u + 0u] = vv;
+            dbgBuf.d[dbgBase + uint(j) * 6u + 1u] = mult.d[oo];
+            dbgBuf.d[dbgBase + uint(j) * 6u + 2u] = sh;
+            dbgBuf.d[dbgBase + uint(j) * 6u + 3u] = int(rr);
+            dbgBuf.d[dbgBase + uint(j) * 6u + 4u] = int(qq);
+            dbgBuf.d[dbgBase + uint(j) * 6u + 5u] = pc.out_zp;
+        }
+    }
+
+    // outBorded=0：直接写宿主紧致缓冲（省掉输出回拷，实测占 10.5%）；
+    //          =1：写带边框的内部缓冲（内部像素 (oy,ox) 落在缓冲区 (oy+1, ox+1)）。
+    const uint outBase = (pc.outBorded == 0u)
+            ? (uint(oy) * pc.out_w + uint(ox)) * pc.out_c4
+            : ((uint(oy) + 1u) * (pc.out_w + 2u) * pc.out_c4 + (uint(ox) + 1u) * pc.out_c4);
+
+    if (groups > 0u) {
+        int accs[4] = int[4](a00, a01, a02, a03);
+        actOut.d[outBase + oc4Base + 0u] = packOut(accs, int(oc4Base + 0u) * 4);
+    }
+    if (groups > 1u) {
+        int accs[4] = int[4](a10, a11, a12, a13);
+        actOut.d[outBase + oc4Base + 1u] = packOut(accs, int(oc4Base + 1u) * 4);
+    }
+    if (groups > 2u) {
+        int accs[4] = int[4](a20, a21, a22, a23);
+        actOut.d[outBase + oc4Base + 2u] = packOut(accs, int(oc4Base + 2u) * 4);
+    }
+    if (groups > 3u) {
+        int accs[4] = int[4](a30, a31, a32, a33);
+        actOut.d[outBase + oc4Base + 3u] = packOut(accs, int(oc4Base + 3u) * 4);
+    }
+}

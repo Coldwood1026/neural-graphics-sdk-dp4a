@@ -1,0 +1,43 @@
+// 通道轴拼接（NHWC，axis=3）：把 src 的内部区域拷到 dst 的指定通道偏移处。
+//
+// ★ 向量化（2026-10-01，性能）：原来每线程只搬 1 个 word（4 字节）。
+//   改成每线程搬 16 字节（uvec4 = 4 个通道组）⇒ 线程数 1/4，固定开销 1/4，
+//   访存仍完全合并。
+//   前提：src_c4 / dst_c4 / dst_c4_off 都是 4 的倍数
+//   （本模型 concat 的输入通道是 16/32、输出 48 ⇒ c4 = 4/8/12 ✓；
+//     不满足时走尾组分支，用读-改-写保证不覆盖相邻数据）。
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(push_constant) uniform PC {
+    uint h;
+    uint w;
+    uint src_c4;
+    uint dst_c4;
+    uint dst_c4_off;
+} pc;
+layout(set = 0, binding = 0) readonly  buffer Src { uvec4 d[]; } src;
+/* 不能加 writeonly：尾组分支要做读-改-写以免覆盖相邻数据 */
+layout(set = 0, binding = 6) buffer Dst { uvec4 d[]; } dst;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint c4 = gl_GlobalInvocationID.z * 4u;
+    if (x >= pc.w || y >= pc.h || c4 >= pc.src_c4) return;
+
+    uint sIdx = (y + 1u) * (pc.w + 2u) * pc.src_c4 + (x + 1u) * pc.src_c4 + c4;
+    uint dIdx = (y + 1u) * (pc.w + 2u) * pc.dst_c4 + (x + 1u) * pc.dst_c4 + (pc.dst_c4_off + c4);
+    uint sq = sIdx >> 2u;
+    uint dq = dIdx >> 2u;
+
+    if (c4 + 4u <= pc.src_c4) {
+        dst.d[dq] = src.d[sq];
+    } else {
+        uvec4 s = src.d[sq];
+        uvec4 o = dst.d[dq];
+        for (uint j = 0u; j < 4u; ++j) {
+            if (c4 + j < pc.src_c4) o[j] = s[j];
+        }
+        dst.d[dq] = o;
+    }
+}

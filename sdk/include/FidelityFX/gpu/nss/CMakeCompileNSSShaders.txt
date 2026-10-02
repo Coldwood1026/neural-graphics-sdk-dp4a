@@ -110,22 +110,21 @@ compile_shaders_with_depfile(
 
 add_shader_output("${NSS_PERMUTATION_OUTPUTS_VERT}")
 
-# data graph models
-
-# for now, assume files will be in vgf format (but extension might be slightly different )
-if (NOT NSS_DATA_GRAPH_EXT)
-    set(NSS_DATA_GRAPH_EXT vgf)
-endif()
-
-
-file(GLOB NSS_DATA_GRAPHS
-    "data_graphs/nss/*.${NSS_DATA_GRAPH_EXT}")
-
-compile_data_graphs(
-    "${VGF_PARSER_EXECUTABLE}"
-    "${FFX_PASS_DATA_GRAPH_OUTPUT_PATH}/"
-    "${NSS_DATA_GRAPHS}" 
-    NSS_DATA_GRAPH_OUTPUTS)
-
-# add the header files they generate to the main list of dependencies
-add_shader_output("${NSS_DATA_GRAPH_OUTPUTS}")
+# -----------------------------------------------------------------------------
+# Data graphs: NO LONGER GENERATED.
+#
+# This used to call compile_data_graphs() with VGF_PARSER_EXECUTABLE
+# (sdk/tools/binary_store/Model_Parser.exe) to turn `data_graphs/nss/*.vgf` into
+# nss_v1_0_1_high_int8.h / nss_v1_0_1_mid_low_int8.h.
+#
+# Both halves of that are gone. The serializer crashes (0xC0000409) on this
+# repository's own .vgf files, and -- more to the point -- it is no longer needed:
+# the headers it produced were consumed only by CreateDataGraphPipelineVK, which
+# fed the VGF bytes to vkCreateDataGraphPipelinesARM. That ARM execution path is
+# replaced by a portable dp4a compute backend which carries its own baked int8
+# weights and never reads a VGF.
+#
+# The descriptors are checked in, hand-written from authoritative sources, at
+# `sdk/src/backends/vk/data_graphs/*.h`. See the header comments there for where
+# each name and count comes from.
+# -----------------------------------------------------------------------------

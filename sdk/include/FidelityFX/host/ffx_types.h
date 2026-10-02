@@ -495,6 +495,20 @@ typedef enum FfxResourceType
 } FfxResourceType;
 
 //TODO: check if there is a better place for these optical flow enums
+/// The transfer function used to convert interpolation source colour data to linear RGB.
+///
+/// Restored together with the D3D12 frame-interpolation swapchain, which is imported from
+/// AMD's FidelityFX SDK 1.1.3 and forwards this through to the frame generation callback.
+/// The Arm fork dropped the enumeration along with the whole D3D12 backend.
+///
+/// @ingroup SDKTypes
+typedef enum FfxBackbufferTransferFunction
+{
+    FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB,
+    FFX_BACKBUFFER_TRANSFER_FUNCTION_PQ,
+    FFX_BACKBUFFER_TRANSFER_FUNCTION_SCRGB
+} FfxBackbufferTransferFunction;
+
 // An enumeration for different optical flow connection types
 ///
 /// @ingroup SDKTypes
@@ -915,6 +929,22 @@ typedef struct FfxConstantAllocation
 ///
 /// @ingroup SDKTypes
 typedef FfxConstantAllocation (*FfxConstantBufferAllocator)(void* data, const FfxUInt64 dataSize);
+
+/// Information about single AMD FidelityFX Breadcrumbs Library GPU memory block.
+///
+/// Restored for the D3D12 backend. The Arm fork removed breadcrumbs along with the whole
+/// D3D12 backend; AMD's FidelityFX SDK 1.1.3 -- which this tree derives from -- still has
+/// them, and the D3D12 backend references this type from 86 places. See
+/// sdk/src/shared/ffx_breadcrumbs_list.{h,cpp}.
+///
+/// @ingroup SDKTypes
+typedef struct FfxBreadcrumbsBlockData {
+    void*    memory;       ///< Pointer to CPU mapped GPU buffer memory.
+    void*    heap;         ///< GPU memory block handle.
+    void*    buffer;       ///< GPU buffer handle for memory block.
+    uint64_t baseAddress;  ///< GPU address of memory block.
+    uint32_t nextMarker;   ///< Index of next marker to be saved in memory block.
+} FfxBreadcrumbsBlockData;
 
 /// An internal structure containing a handle to a resource and resource views
 ///
@@ -1598,6 +1628,13 @@ typedef struct FfxFrameGenerationDispatchDescription
     uint32_t       numInterpolatedFrames;  ///< The number of frames to interpolate from the passed in color target
     bool           reset;                  ///< A boolean value which when set to true, indicates the camera has moved discontinuously.
     uint64_t       frameID;
+
+    // Restored from AMD FidelityFX SDK 1.1.3 for the imported D3D12 frame-interpolation
+    // swapchain, which fills these in for the frame generation callback. Nothing in the
+    // Arm fork's own provider reads them, so they are purely additive.
+    FfxRect2D                    interpolationRect;          ///< The sub-rectangle of the presentation colour to interpolate.
+    FfxBackbufferTransferFunction backBufferTransferFunction; ///< Transfer function used to linearise the interpolation source colour.
+    float                        minMaxLuminance[2];         ///< Min/max luminance of the source, for the transfer function.
 } FfxFrameGenerationDispatchDescription;
 
 //struct definition matches FfxApiEffectMemoryUsage

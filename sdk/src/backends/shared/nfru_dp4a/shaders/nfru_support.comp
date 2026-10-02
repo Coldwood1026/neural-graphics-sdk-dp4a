@@ -1,0 +1,106 @@
+// =============================================================================
+// NFRU v1 support kernels -- copy / nearest x2 resize / channel concat
+// =============================================================================
+// The graph's non-convolution ops. Everything works on flat uint32 words, because an
+// int8 NHWC tensor is stored four channels per word and all three ops preserve that
+// packing exactly (concat boundaries are 4-channel aligned in this model, so no
+// sub-word shifting is ever needed).
+//
+// One shader with a mode switch rather than three pipelines: the ops share a push
+// constant block and a dispatch shape, so this keeps the backend small and keeps the
+// Vulkan and DX12 paths structurally identical.
+//
+// Push constants are declared as a uint array and read through index constants so that
+// the block is exactly 16 words on both APIs and matches the DX12 32-bit root constants
+// without any layout guesswork.
+//
+// SPDX-License-Identifier: MIT
+// =============================================================================
+
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#define PC_OP            0u   /* 0 = copy, 1 = resize2x, 2 = concat */
+#define PC_COUNT         1u   /* total words to produce */
+#define PC_OUT_OFF       2u   /* destination word offset */
+#define PC_DST_W         3u
+#define PC_DST_H         4u
+#define PC_DST_C4        5u   /* words per pixel in the destination */
+#define PC_SRC_OFF       6u   /* source word offset, copy/resize */
+#define PC_SRC_W         7u
+#define PC_SRC_H         8u
+#define PC_SRC_C4        9u
+#define PC_PLANE_ROWS   10u   /* concat: source plane height in rows */
+#define PC_PLANE_WORDS  11u   /* concat: source plane row stride in words */
+#define PC_SRC_C4_MUL   12u   /* concat: output words per source pixel */
+#define PC_IN_OFF       13u   /* concat: source word offset */
+#define PC_RESERVED     14u
+#define PC_RESERVED2    15u
+
+layout(push_constant) uniform PC { uint d[16]; } pc;
+
+layout(set = 0, binding = 0) readonly  buffer Src { uint d[]; } src;
+layout(set = 0, binding = 1) writeonly buffer Dst { uint d[]; } dst;
+
+void main()
+{
+    const uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.d[PC_COUNT]) {
+        return;
+    }
+
+    const uint op = pc.d[PC_OP];
+
+    if (op == 0u) {
+        // Straight word copy. Used to place a tensor into the host output buffer and,
+        // if the host aliases slots, to gather one.
+        dst.d[pc.d[PC_OUT_OFF] + gid] = src.d[pc.d[PC_SRC_OFF] + gid];
+        return;
+    }
+
+    if (op == 1u) {
+        /*
+         * Nearest x2 upsample: destination (x, y) samples source (x/2, y/2). The channel
+         * words are copied through untouched, so the int8 packing is preserved.
+         *
+         * `gid` indexes WORDS, and there are `c4` words per pixel, so it has to be split
+         * as (pixel, channel word) rather than as (x, y). Treating gid as a pixel index --
+         * computing x = gid % dstW and y = (gid / dstW) % dstH -- is only correct when
+         * c4 == 1; at conv5e's 16 channels (c4 == 4) it walked a quarter of the
+         * destination as if it were the whole thing, in the wrong order.
+         */
+        const uint srcW  = pc.d[PC_SRC_W];
+        const uint c4    = pc.d[PC_SRC_C4];
+        const uint dstW  = pc.d[PC_DST_W];
+        const uint dstH  = pc.d[PC_DST_H];
+        const uint word  = gid % c4;
+        const uint pix   = gid / c4;
+        const uint x     = pix % dstW;
+        const uint y     = (pix / dstW) % dstH;
+        const uint rest  = pix / (dstW * dstH);
+        const uint sx    = x >> 1u;
+        const uint sy    = y >> 1u;
+        const uint srcIdx = pc.d[PC_SRC_OFF] + rest * (srcW * pc.d[PC_SRC_H] * c4)
+                          + (sy * srcW + sx) * c4 + word;
+        dst.d[pc.d[PC_OUT_OFF] + gid] = src.d[srcIdx];
+        return;
+    }
+
+    // op == 2: concatenate along channels. A single dispatch covers all source planes;
+    // the plane is selected from the pixel index so no per-source dispatch is needed.
+    const uint planeRows  = pc.d[PC_PLANE_ROWS];   // source height
+    const uint planeWords = pc.d[PC_PLANE_WORDS];  // source row stride in words
+    const uint mul        = pc.d[PC_SRC_C4_MUL];   // destination words per source pixel
+    const uint srcPlane   = planeRows * planeWords;
+    const uint dstPixelWords = pc.d[PC_DST_C4];
+    const uint srcPixelsPerPlane = planeRows * planeWords / mul;
+
+    const uint pixel = gid / mul;
+    const uint which = pixel / srcPixelsPerPlane;       // which source plane
+    const uint inPlane = pixel % srcPixelsPerPlane;     // pixel within that plane
+    const uint word = gid % mul;                        // which word within the pixel
+    const uint srcIdx = pc.d[PC_IN_OFF] + which * srcPlane + inPlane * mul + word;
+
+    dst.d[pc.d[PC_OUT_OFF] + inPlane * dstPixelWords + which * mul + word] = src.d[srcIdx];
+}

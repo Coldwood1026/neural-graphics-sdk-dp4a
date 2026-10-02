@@ -31,6 +31,14 @@
 #include <FidelityFX/host/ffx_util.h>
 #include <ffx_shader_blobs.h>
 
+// The portable dp4a inference backend that replaces the VK_ARM_data_graph execution
+// path. It is API-agnostic above the Device interface (see nfru_plan.cpp): the same
+// implementation drives the D3D12 backend through nfru_dx12.cpp, which is what makes
+// the two APIs produce bit-identical results.
+#include "nfru_dp4a.h"
+#include "nfru_device.h"
+#include "nss_dp4a.h"
+
 #ifdef _WIN32
 #if !defined(__UNREAL__)  // Unreal wants to include its own minimal windows .h
 #include <windows.h>
@@ -450,6 +458,30 @@ typedef struct BackendContext_VK
         // Data graph pipeline session memory owned by this pipeline layout.
         VkDeviceMemory dataGraphSessionMemory;
         VkDeviceSize   dataGraphSessionMemorySize;
+
+        // Portable dp4a inference backend state. Replaces the VkDataGraphPipelineARM +
+        // VkDataGraphPipelineSessionARM pair; see CreateDataGraphPipelineVK. Null means
+        // this data-graph pass has no dp4a implementation yet.
+        NfruDp4aContext* dataGraphDp4a;
+        FfxUInt32        dataGraphWidth;
+        FfxUInt32        dataGraphHeight;
+        // Which model this pass runs, as named by the checked-in descriptors. Lets the
+        // dispatch path refuse a model the backend does not implement instead of
+        // executing the wrong weights.
+        char             dataGraphEntryPoint[64];
+
+        /*
+         * NSS's dp4a backend. A separate module from NFRU's -- different network, its own
+         * kernels and baked weights -- see sdk/src/backends/shared/nss_dp4a/.
+         *
+         * Unlike NFRU this one cannot be built at pipeline-creation time: NSS uploads its
+         * weights through a *command buffer*, and ffxCreateDataGraphPipeline is called
+         * before any exists. So the create info is parked here and the context is built on
+         * the first dispatch, which is also the first time we have somewhere to record the
+         * upload. See executeGpuJobDataGraph.
+         */
+        NssDp4aContext*   dataGraphNss;
+        NssDp4aCreateInfo dataGraphNssCreateInfo;
 
         char      name[64];
         FfxUInt32 effectContextId;
@@ -2578,71 +2610,29 @@ FfxErrorCode GetDeviceCapabilitiesVK(FfxInterface* backendInterface, FfxDeviceCa
             deviceCapabilities->computeSupportTensor  = static_cast<bool>(tensorProps.shaderTensorSupportedStages & VK_SHADER_STAGE_COMPUTE_BIT);
             deviceCapabilities->fragmentSupportTensor = static_cast<bool>(tensorProps.shaderTensorSupportedStages & VK_SHADER_STAGE_FRAGMENT_BIT);
         }
-        else if (strcmp(extensionName, VK_ARM_DATA_GRAPH_EXTENSION_NAME) == 0)
+        else if (strcmp(extensionName, VK_ARM_DATA_GRAPH_EXTENSION_NAME) == 0 ||
+                 strcmp(extensionName, VK_ARM_DATA_GRAPH_OPTICAL_FLOW_EXTENSION_NAME) == 0)
         {
-            // no features structure so extension name is enough
-            deviceCapabilities->dataGraphSupported = true;
-        }
-        else if (strcmp(extensionName, VK_ARM_DATA_GRAPH_OPTICAL_FLOW_EXTENSION_NAME) == 0)
-        {
-            // Check whether the data graph optical flow feature is supported.
-            VkPhysicalDeviceDataGraphOpticalFlowFeaturesARM dataGraphOpticalFlowFeatures = {};
-            dataGraphOpticalFlowFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DATA_GRAPH_OPTICAL_FLOW_FEATURES_ARM;
-
-            VkPhysicalDeviceFeatures2 physicalDeviceFeatures2 = {};
-            physicalDeviceFeatures2.sType                     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            physicalDeviceFeatures2.pNext                     = &dataGraphOpticalFlowFeatures;
-
-            VulkanWrapper().vkGetPhysicalDeviceFeatures2(backendContext->physicalDevice, &physicalDeviceFeatures2);
-            deviceCapabilities->dataGraphOFSupported = static_cast<bool>(dataGraphOpticalFlowFeatures.dataGraphOpticalFlow);
-
-            // Check the detailed properties of the data graph optical flow.
-            if (deviceCapabilities->dataGraphOFSupported)
-            {
-                VkQueueFamilyDataGraphOpticalFlowPropertiesARM dataGraphOFProperties = {};
-                dataGraphOFProperties.sType                                          = VK_STRUCTURE_TYPE_QUEUE_FAMILY_DATA_GRAPH_OPTICAL_FLOW_PROPERTIES_ARM;
-
-                const auto queryQueueFamilyDataGraphOpProperties = VulkanWrapper().vkGetPhysicalDeviceQueueFamilyDataGraphEngineOperationPropertiesARM;
-                if (!queryQueueFamilyDataGraphOpProperties)
-                {
-                    // Extension is exposed but the query entrypoint is not available.
-                    deviceCapabilities->dataGraphOFSupported = false;
-                    continue;
-                }
-
-                uint32_t queueFamilyCount = 0;
-                VulkanWrapper().vkGetPhysicalDeviceQueueFamilyProperties(backendContext->physicalDevice, &queueFamilyCount, nullptr);
-
-                for (uint32_t queueFamilyIndex = 0; queueFamilyIndex < queueFamilyCount; ++queueFamilyIndex)
-                {
-                    VkQueueFamilyDataGraphPropertiesARM queueFamilyDataGraphProperties = {};
-                    queueFamilyDataGraphProperties.sType                               = VK_STRUCTURE_TYPE_QUEUE_FAMILY_DATA_GRAPH_PROPERTIES_ARM;
-                    queueFamilyDataGraphProperties.engine.type                         = VK_PHYSICAL_DEVICE_DATA_GRAPH_PROCESSING_ENGINE_TYPE_DEFAULT_ARM;
-                    queueFamilyDataGraphProperties.engine.isForeign                    = VK_FALSE;
-                    queueFamilyDataGraphProperties.operation.operationType             = VK_PHYSICAL_DEVICE_DATA_GRAPH_OPERATION_TYPE_OPTICAL_FLOW_ARM;
-                    std::strncpy(
-                        queueFamilyDataGraphProperties.operation.name, "OpticalFlow", VK_MAX_PHYSICAL_DEVICE_DATA_GRAPH_OPERATION_SET_NAME_SIZE_ARM - 1);
-                    queueFamilyDataGraphProperties.operation.version = 1;
-
-                    const VkResult queryRes = queryQueueFamilyDataGraphOpProperties(backendContext->physicalDevice,
-                                                                                    queueFamilyIndex,
-                                                                                    &queueFamilyDataGraphProperties,
-                                                                                    reinterpret_cast<VkBaseOutStructure*>(&dataGraphOFProperties));
-
-                    if (queryRes == VK_SUCCESS)
-                    {
-                        deviceCapabilities->costSupported            = static_cast<bool>(dataGraphOFProperties.costSupported);
-                        deviceCapabilities->hintSupported            = static_cast<bool>(dataGraphOFProperties.hintSupported);
-                        deviceCapabilities->supportedHintGridSizes   = static_cast<uint32_t>(dataGraphOFProperties.supportedHintGridSizes);
-                        deviceCapabilities->supportedOutputGridSizes = static_cast<uint32_t>(dataGraphOFProperties.supportedOutputGridSizes);
-                        deviceCapabilities->dataGraphOFMinWidth      = dataGraphOFProperties.minWidth;
-                        deviceCapabilities->dataGraphOFMinHeight     = dataGraphOFProperties.minHeight;
-                        deviceCapabilities->dataGraphOFMaxWidth      = dataGraphOFProperties.maxWidth;
-                        deviceCapabilities->dataGraphOFMaxHeight     = dataGraphOFProperties.maxHeight;
-                        break;
-                    }
-                }
-            }
+            /*
+             * Deliberately ignored, and reported as unsupported.
+             *
+             * VK_ARM_data_graph used to BE the execution path for the NFRU inference
+             * graph and for optical flow in this fork. The inference graph now runs on
+             * the portable dp4a backend, which needs no vendor extension, so nothing in
+             * this backend will ever create a data-graph pipeline or a data-graph
+             * session -- and claiming support for an extension we do not use would only
+             * mislead the caller into taking a path that no longer exists.
+             *
+             * Optical flow is the casualty worth naming: this fork implemented it as a
+             * VK_ARM_data_graph_optical_flow pipeline, replacing FSR3's compute-shader
+             * implementation. With the data graph gone, Vulkan optical flow is
+             * unavailable until that compute-shader path is restored -- it is intact in
+             * AMD's FidelityFX SDK 1.1.3, which this tree derives from. Reporting the
+             * capability truthfully lets the caller decide, instead of discovering it
+             * when a pipeline creation fails later.
+             */
+            deviceCapabilities->dataGraphSupported   = false;
+            deviceCapabilities->dataGraphOFSupported = false;
         }
     }
 
@@ -5714,365 +5704,134 @@ FfxErrorCode CreateDataGraphPipelineVK(FfxInterface*                 backendInte
     FFX_ASSERT_MESSAGE(effectContext.nextPipelineLayout < (effectContextId * FFX_MAX_PASS_COUNT) + FFX_MAX_PASS_COUNT,
                        "FFXInterface: Vulkan: Ran out of pipeline layouts. Please increase FFX_MAX_PASS_COUNT");
     BackendContext_VK::PipelineLayout* pPipelineLayout = &backendContext->pPipelineLayouts[effectContext.nextPipelineLayout++];
+    //////////////////////////////////////////////////////////////////////////
+    // Portable dp4a inference backend -- this replaces
+    // vkCreateDataGraphPipelinesARM, vkCreateDataGraphPipelineSessionARM and the
+    // session's device memory outright.
+    //
+    // The blob's tensor tables are still the interface between the SDK and the graph:
+    // the effect code joins them BY NAME against its own resource tables
+    // (patchResourceIdentifier), so those strings and their order are copied through
+    // unchanged. What disappears is the VGF payload, the ARM pipeline object and its
+    // session memory. The int8 weights are baked into the backend, so nothing here
+    // reads a model file.
+    const FfxUInt32 srvTensorCount = dataGraphBlob.inputTensorNums;
+    const FfxUInt32 uavTensorCount = dataGraphBlob.outputTensorNums;
 
-    // Setup descriptor sets
-    std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
+    FFX_ASSERT(srvTensorCount > 0 && uavTensorCount > 0);
+    FFX_ASSERT(srvTensorCount <= FFX_MAX_RESOURCE_COUNT && uavTensorCount <= FFX_MAX_RESOURCE_COUNT);
 
-    // Support more when needed
-    VkShaderStageFlags shaderStageFlags = VK_SHADER_STAGE_ALL;
-
-    // Input Tensors
-    for (uint32_t tensorIndex = 0; tensorIndex < dataGraphBlob.inputTensorNums; ++tensorIndex)
-    {
-        VkDescriptorSetLayoutBinding binding = {dataGraphBlob.inputTensorBindings[tensorIndex], VK_DESCRIPTOR_TYPE_TENSOR_ARM, 1, shaderStageFlags, nullptr};
-        layoutBindings.emplace_back(binding);
-    }
-
-    // Output Tensors
-    for (uint32_t tensorIndex = 0; tensorIndex < dataGraphBlob.outputTensorNums; ++tensorIndex)
-    {
-        VkDescriptorSetLayoutBinding binding = {dataGraphBlob.outputTensorBindings[tensorIndex], VK_DESCRIPTOR_TYPE_TENSOR_ARM, 1, shaderStageFlags, nullptr};
-        layoutBindings.emplace_back(binding);
-    }
-
-    FFX_ASSERT(layoutBindings.size() <= MAX_DESCRIPTOR_SET_LAYOUTS);
-
-    // Create the descriptor layout
-    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
-    layoutInfo.sType                           = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount                    = static_cast<uint32_t>(layoutBindings.size());
-    layoutInfo.pBindings                       = layoutBindings.data();
-
-    if (VulkanWrapper().vkCreateDescriptorSetLayout(backendContext->device, &layoutInfo, nullptr, &pPipelineLayout->descriptorSetLayout) != VK_SUCCESS)
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    // allocate descriptor sets
-    pPipelineLayout->descriptorSetIndex = 0;
-    for (uint32_t i = 0; i < (FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME); i++)
-    {
-        VkDescriptorSetAllocateInfo allocateInfo = {};
-        allocateInfo.sType                       = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocateInfo.descriptorPool              = backendContext->descriptorPool;
-        allocateInfo.descriptorSetCount          = 1;
-        allocateInfo.pSetLayouts                 = &pPipelineLayout->descriptorSetLayout;
-
-        if (VulkanWrapper().vkAllocateDescriptorSets(backendContext->device, &allocateInfo, &pPipelineLayout->descriptorSets[i]) != VK_SUCCESS)
-        {
-            return FFX_ERROR_BACKEND_API_ERROR;
-        }
-    }
-
-    // create the pipeline layout
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount         = 1;
-    pipelineLayoutInfo.pSetLayouts            = &pPipelineLayout->descriptorSetLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 0;
-    pipelineLayoutInfo.pPushConstantRanges    = nullptr;
-
-    if (VulkanWrapper().vkCreatePipelineLayout(backendContext->device, &pipelineLayoutInfo, nullptr, &pPipelineLayout->pipelineLayout) != VK_SUCCESS)
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    pPipelineLayout->effectContextId = effectContextId;
-
-    // set the root signature to pipeline
-    outPipeline->rootSignature = reinterpret_cast<FfxRootSignature>(pPipelineLayout);
-
-    outPipeline->cmdSignature = nullptr;
-
-    outPipeline->uavTensorCount = dataGraphBlob.outputTensorNums;
-    FFX_ASSERT(outPipeline->uavTensorCount < FFX_MAX_NUM_TENSORS);
-    for (uint32_t tensorIndex = 0; tensorIndex < dataGraphBlob.outputTensorNums; ++tensorIndex)
-    {
-        outPipeline->uavTensorBindings[tensorIndex].slotIndex  = dataGraphBlob.outputTensorBindings[tensorIndex];
-        outPipeline->uavTensorBindings[tensorIndex].arrayIndex = 0;
-        strncpy(outPipeline->uavTensorBindings[tensorIndex].name, dataGraphBlob.outputTensorNames[tensorIndex], FFX_RESOURCE_NAME_SIZE - 1);
-        outPipeline->uavTensorBindings[tensorIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-    }
-
-    outPipeline->srvTensorCount = dataGraphBlob.inputTensorNums;
-    FFX_ASSERT(outPipeline->srvTensorCount < FFX_MAX_NUM_TENSORS);
-    for (uint32_t tensorIndex = 0; tensorIndex < dataGraphBlob.inputTensorNums; ++tensorIndex)
+    for (uint32_t tensorIndex = 0; tensorIndex < srvTensorCount; ++tensorIndex)
     {
         outPipeline->srvTensorBindings[tensorIndex].slotIndex  = dataGraphBlob.inputTensorBindings[tensorIndex];
         outPipeline->srvTensorBindings[tensorIndex].arrayIndex = 0;
-        strncpy(outPipeline->srvTensorBindings[tensorIndex].name, dataGraphBlob.inputTensorNames[tensorIndex], FFX_RESOURCE_NAME_SIZE - 1);
+        strncpy(outPipeline->srvTensorBindings[tensorIndex].name,
+                dataGraphBlob.inputTensorNames[tensorIndex], FFX_RESOURCE_NAME_SIZE - 1);
         outPipeline->srvTensorBindings[tensorIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
     }
+    outPipeline->srvTensorCount = srvTensorCount;
 
-    DescriptorSetBindingToShapeMap inputShapes = GetInputShapes(dataGraphBlob, dataGraphWidth, dataGraphHeight);
-
-    ShapeInferenceResults ShapeInferenceResults =
-        RunShapeInference(reinterpret_cast<const uint32_t*>(dataGraphBlob.graphData), dataGraphBlob.graphDataSize / 4, inputShapes);
-
-    if (!ShapeInferenceResults.Success)
+    for (uint32_t tensorIndex = 0; tensorIndex < uavTensorCount; ++tensorIndex)
     {
-        return FFX_ERROR_BACKEND_API_ERROR;
+        outPipeline->uavTensorBindings[tensorIndex].slotIndex  = dataGraphBlob.outputTensorBindings[tensorIndex];
+        outPipeline->uavTensorBindings[tensorIndex].arrayIndex = 0;
+        strncpy(outPipeline->uavTensorBindings[tensorIndex].name,
+                dataGraphBlob.outputTensorNames[tensorIndex], FFX_RESOURCE_NAME_SIZE - 1);
+        outPipeline->uavTensorBindings[tensorIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
     }
+    outPipeline->uavTensorCount = uavTensorCount;
 
-    // shader module
-    VkShaderModule           shaderModule           = VK_NULL_HANDLE;
-    VkShaderModuleCreateInfo shaderModuleCreateInfo = {};
-    shaderModuleCreateInfo.sType                    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    shaderModuleCreateInfo.pCode                    = ShapeInferenceResults.NewCode.data();
-    shaderModuleCreateInfo.codeSize                 = ShapeInferenceResults.NewCode.size() * sizeof(ShapeInferenceResults.NewCode[0]);
+    const char* entryPoint = (dataGraphBlob.graphEntryPoint != nullptr) ? dataGraphBlob.graphEntryPoint : "";
 
-    if (VulkanWrapper().vkCreateShaderModule(backendContext->device, &shaderModuleCreateInfo, nullptr, &shaderModule) != VK_SUCCESS)
+    pPipelineLayout->dataGraphDp4a   = nullptr;
+    pPipelineLayout->dataGraphWidth  = dataGraphWidth;
+    pPipelineLayout->dataGraphHeight = dataGraphHeight;
+    pPipelineLayout->effectContextId = effectContextId;
+    strncpy(pPipelineLayout->dataGraphEntryPoint, entryPoint,
+            sizeof(pPipelineLayout->dataGraphEntryPoint) - 1);
+    pPipelineLayout->dataGraphEntryPoint[sizeof(pPipelineLayout->dataGraphEntryPoint) - 1] = '\0';
+
+    // -------------------------------------------------------------------------
+    // Build the dp4a context for the models this backend implements.
+    //
+    // Only NFRU v1 is implemented today. NSS's graphs are a DIFFERENT network: they
+    // consume the preprocessed tensor and emit KPN coefficients plus a temporal
+    // feedback tensor. Running NFRU's weights against them would silently produce
+    // garbage, so an unimplemented model is refused HERE and reported again at dispatch
+    // time, rather than approximated.
+    // -------------------------------------------------------------------------
+        /*
+     * NSS. Two models, one per quality tier, named by the checked-in descriptors:
+     *
+     *     nss_v1_0_1_high_int8      KPN 6x6 = 36 channels, input at 1/2 resolution
+     *     nss_v1_0_1_mid_low_int8   KPN 4x4 = 16 channels, input at 1/4 resolution
+     *
+     * Nothing is created here. NSS uploads its weights through a command buffer and there
+     * is none at pipeline-creation time, so the context waits for the first dispatch --
+     * see the dataGraphNss* fields in PipelineLayout.
+     */
+    if (strcmp(entryPoint, "nss_v1_0_1_high_int8") == 0 ||
+        strcmp(entryPoint, "nss_v1_0_1_mid_low_int8") == 0)
     {
-        return FFX_ERROR_BACKEND_API_ERROR;
+        NssDp4aCreateInfo ci = {};
+        ci.instance       = (uint64_t)backendContext->instance;
+        ci.physicalDevice = (uint64_t)backendContext->physicalDevice;
+        ci.device         = (uint64_t)backendContext->device;
+        ci.apiVersion     = 0;
+        ci.quality        = (strcmp(entryPoint, "nss_v1_0_1_high_int8") == 0)
+                                ? NSS_DP4A_QUALITY_HIGH
+                                : NSS_DP4A_QUALITY_MID_LOW;
+        ci.width          = dataGraphWidth;
+        ci.height         = dataGraphHeight;
+        /*
+         * Deliberately zero. The SDK's Vulkan backend holds no VkQueue, and these are only
+         * consulted on the self-submit path: with a non-null uploadCommandBuffer the module
+         * records its copies into the caller's buffer and never creates a command pool at
+         * all (see the guard in nss_dp4a.cpp). That is the only reason this integration
+         * works without a queue.
+         */
+        ci.queue                 = 0;
+        ci.queueFamilyIndex      = 0;
+        ci.uploadCommandBuffer   = 0;   /* filled in at first dispatch */
+        ci.vkGetInstanceProcAddr = nullptr;
+
+        pPipelineLayout->dataGraphNss           = nullptr;
+        pPipelineLayout->dataGraphNssCreateInfo = ci;
     }
-
-    std::vector<VkTensorDescriptionARM>         pipelineTensorConstantDescs;
-    std::vector<VkDataGraphPipelineConstantARM> pipelineConstants;
-
-    pipelineTensorConstantDescs.resize(dataGraphBlob.constantNums);
-
-    for (FfxUInt32 constantIndex = 0; constantIndex < dataGraphBlob.constantNums; ++constantIndex)
+    else if (strcmp(entryPoint, "nfru_v1_int8") == 0)
     {
-        // VUID-VkDataGraphPipelineConstantARM-pNext-09917 requires the tiling format must be linear.
-        VkTensorDescriptionARM tensorDescription = {VK_STRUCTURE_TYPE_TENSOR_DESCRIPTION_ARM,
-                                                    nullptr,
-                                                    VK_TENSOR_TILING_LINEAR_ARM,
-                                                    (VkFormat)dataGraphBlob.constantFormats[constantIndex],
-                                                    dataGraphBlob.constantShapeSize[constantIndex],
-                                                    dataGraphBlob.constantShapes[constantIndex],
-                                                    nullptr,  // pStrides
-                                                    VK_TENSOR_USAGE_DATA_GRAPH_BIT_ARM};
+        NfruDp4aCreateInfo ci = {};
+        ci.instance       = (uint64_t)backendContext->instance;
+        ci.physicalDevice = (uint64_t)backendContext->physicalDevice;
+        ci.device         = (uint64_t)backendContext->device;
+        // The backend only RECORDS into the host's command buffer: it never submits and
+        // never waits on a fence, so it needs neither a queue nor a queue family. The
+        // SDK's Vulkan backend holds no VkQueue to give it in any case.
+        ci.queue            = 0;
+        ci.queueFamilyIndex = 0;
+        ci.apiVersion       = 0;
+        // Let the backend resolve its own entry points from vulkan-1.dll; it is the same
+        // loader that created the instance above, so the handles are interchangeable.
+        ci.vkGetInstanceProcAddr = nullptr;
+        ci.width  = dataGraphWidth;
+        ci.height = dataGraphHeight;
 
-        pipelineTensorConstantDescs[constantIndex] = tensorDescription;
-
-        VkDataGraphPipelineConstantARM pipelineConstant = {VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_CONSTANT_ARM,
-                                                           &pipelineTensorConstantDescs[constantIndex],
-                                                           dataGraphBlob.constantIds[constantIndex],
-                                                           dataGraphBlob.constantDatas[constantIndex]};
-
-        pipelineConstants.push_back(pipelineConstant);
-    }
-
-    VkDataGraphPipelineShaderModuleCreateInfoARM dataGraphPipelineShaderModuleCreateInfo = {VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SHADER_MODULE_CREATE_INFO_ARM,
-                                                                                            nullptr,
-                                                                                            shaderModule,
-                                                                                            dataGraphBlob.graphEntryPoint,
-                                                                                            nullptr,
-                                                                                            dataGraphBlob.constantNums,
-                                                                                            pipelineConstants.data()};
-
-    std::vector<VkTensorDescriptionARM>             tensorDescs;
-    std::vector<VkDataGraphPipelineResourceInfoARM> resourceInfos;
-
-    tensorDescs.resize(dataGraphBlob.inputTensorNums + dataGraphBlob.outputTensorNums);
-    const auto isTensorBufferAliased = [&](const char* tensorName) -> bool {
-        if (desc->dataGraphTensorInfo == nullptr || desc->dataGraphTensorInfoCount == 0 || tensorName == nullptr)
+        NfruDp4aContext* dp4a = nullptr;
+        if (nfruDp4aCreateContext(&ci, &dp4a) != NFRU_DP4A_OK)
         {
-            return false;
+            return FFX_ERROR_BACKEND_API_ERROR;
         }
-
-        for (FfxUInt32 tensorInfoIndex = 0; tensorInfoIndex < desc->dataGraphTensorInfoCount; ++tensorInfoIndex)
-        {
-            const FfxDataGraphTensorInfo& tensorInfo = desc->dataGraphTensorInfo[tensorInfoIndex];
-            if (tensorInfo.resourceName != nullptr && 0 == strcmp(tensorInfo.resourceName, tensorName))
-            {
-                return tensorInfo.bufferAliased;
-            }
-        }
-
-        return false;
-    };
-
-    constexpr uint32_t MESSAGE_BUFFER_SIZE = 256;
-    char               message[MESSAGE_BUFFER_SIZE];
-    for (FfxUInt32 tensorIndex = 0; tensorIndex < dataGraphBlob.inputTensorNums; ++tensorIndex)
-    {
-        std::pair<uint32_t, uint32_t> binding{0, dataGraphBlob.inputTensorBindings[tensorIndex]};  // [set, binding]
-        const auto&                   tensorShape       = ShapeInferenceResults.Shapes[binding];
-        const uint32_t                dimensionCount    = tensorShape.size();
-        const bool                    bufferAliased     = isTensorBufferAliased(dataGraphBlob.inputTensorNames[tensorIndex]);
-        VkTensorDescriptionARM        tensorDescription = {VK_STRUCTURE_TYPE_TENSOR_DESCRIPTION_ARM,
-                                                    nullptr,
-                                                    GetTensorTiling(bufferAliased),
-                                                    (VkFormat)dataGraphBlob.inputTensorFormats[tensorIndex],
-                                                    static_cast<uint32_t>(dimensionCount),
-                                                    tensorShape.data(),
-                                                    nullptr,  // pStrides
-                                                    VK_TENSOR_USAGE_DATA_GRAPH_BIT_ARM};
-
-        tensorDescs[tensorIndex] = tensorDescription;
-
-        VkDataGraphPipelineResourceInfoARM resourceInfo = {
-            VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_RESOURCE_INFO_ARM,
-            &tensorDescs[tensorIndex],
-            binding.first,   // descriptorSet
-            binding.second,  // binding
-            0                // array element
-        };
-
-        resourceInfos.push_back(resourceInfo);
-
-        snprintf(message,
-                 MESSAGE_BUFFER_SIZE,
-                 "Input tensor %u: set=%u, binding=%u, rank=%u, buffer_aliased=%u\n",
-                 tensorIndex,
-                 binding.first,
-                 binding.second,
-                 dimensionCount,
-                 (uint32_t)bufferAliased);
-        PrintMessage(backendInterface, FFX_MESSAGE_TYPE_WARNING, message);
-        for (uint32_t i = 0; i < dimensionCount; ++i)
-        {
-            snprintf(message, MESSAGE_BUFFER_SIZE, "\tDimension[%u]: %u\n", i, tensorShape[i]);
-            PrintMessage(backendInterface, FFX_MESSAGE_TYPE_WARNING, message);
-        }
+        pPipelineLayout->dataGraphDp4a = dp4a;
     }
 
-    // output tensors infos
-    for (FfxUInt32 tensorIndex = 0; tensorIndex < dataGraphBlob.outputTensorNums; ++tensorIndex)
-    {
-        std::pair<uint32_t, uint32_t> binding{0, dataGraphBlob.outputTensorBindings[tensorIndex]};  // [set, binding]
-        const auto&                   tensorShape    = ShapeInferenceResults.Shapes[binding];
-        const uint32_t                dimensionCount = tensorShape.size();
-        const bool                    bufferAliased  = isTensorBufferAliased(dataGraphBlob.outputTensorNames[tensorIndex]);
-
-        VkTensorDescriptionARM tensorDescription = {VK_STRUCTURE_TYPE_TENSOR_DESCRIPTION_ARM,
-                                                    nullptr,
-                                                    GetTensorTiling(bufferAliased),
-                                                    (VkFormat)dataGraphBlob.outputTensorFormats[tensorIndex],
-                                                    static_cast<uint32_t>(dimensionCount),
-                                                    tensorShape.data(),
-                                                    nullptr,  // pStrides
-                                                    VK_TENSOR_USAGE_DATA_GRAPH_BIT_ARM};
-
-        tensorDescs[tensorIndex + dataGraphBlob.inputTensorNums] = tensorDescription;
-
-        VkDataGraphPipelineResourceInfoARM resourceInfo = {
-            VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_RESOURCE_INFO_ARM,
-            &tensorDescs[tensorIndex + dataGraphBlob.inputTensorNums],
-            binding.first,   // descriptorSet
-            binding.second,  // binding
-            0                // array element
-        };
-
-        resourceInfos.push_back(resourceInfo);
-
-        snprintf(message,
-                 MESSAGE_BUFFER_SIZE,
-                 "Output tensor %u: set=%u, binding=%u, rank=%u, buffer_aliased=%u\n",
-                 tensorIndex,
-                 binding.first,
-                 binding.second,
-                 dimensionCount,
-                 (uint32_t)bufferAliased);
-        PrintMessage(backendInterface, FFX_MESSAGE_TYPE_WARNING, message);
-        for (uint32_t i = 0; i < dimensionCount; ++i)
-        {
-            snprintf(message, MESSAGE_BUFFER_SIZE, "\tDimension[%u]: %lld\n", i, tensorShape[i]);
-            PrintMessage(backendInterface, FFX_MESSAGE_TYPE_WARNING, message);
-        }
-    }
-
-    // create the data graph pipeline
-    VkDataGraphPipelineCreateInfoARM pipelineCreateInfo = {
-        VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_CREATE_INFO_ARM,
-        &dataGraphPipelineShaderModuleCreateInfo,
-        0,                                            // flags
-        pPipelineLayout->pipelineLayout,              // layout
-        static_cast<uint32_t>(resourceInfos.size()),  // resourceInfoCount
-        resourceInfos.data(),                         // pResourceInfos
-    };
-
-    VkPipeline dataGraphPipeline = VK_NULL_HANDLE;
-    if (VulkanWrapper().vkCreateDataGraphPipelinesARM(
-            backendContext->device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &dataGraphPipeline) != VK_SUCCESS)
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    // done with shader module, so clean up
-    VulkanWrapper().vkDestroyShaderModule(backendContext->device, shaderModule, nullptr);
-
-    // set the pipeline
-    outPipeline->pipeline = reinterpret_cast<FfxPipeline>(dataGraphPipeline);
-
-    // Setup the pipeline name
-    strncpy(outPipeline->name, desc->name, FFX_RESOURCE_NAME_SIZE - 1);
+    strncpy(outPipeline->name, (desc->name != nullptr) ? desc->name : "dp4a data graph",
+            FFX_RESOURCE_NAME_SIZE - 1);
     outPipeline->name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-
-    const VkDataGraphPipelineSessionCreateInfoARM sessionCreateInfo = {
-        VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_CREATE_INFO_ARM, nullptr, 0, dataGraphPipeline};
-
-    VkDataGraphPipelineSessionARM session;
-    if (VulkanWrapper().vkCreateDataGraphPipelineSessionARM(backendContext->device, &sessionCreateInfo, nullptr, &session))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    // Use cpp standard way (eg.reinterpret_cast) to store opaque vulkan handles in generic pointers
-    outPipeline->session = reinterpret_cast<FfxDataGraphPipelineSession>(session);
-
-    // Query the number of bind points to which memory must be bound
-    uint32_t                                               numRequiredBindPoints = 0;
-    VkDataGraphPipelineSessionBindPointRequirementsInfoARM bindPointReqsInfo     = {
-        VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_BIND_POINT_REQUIREMENTS_INFO_ARM, nullptr, session};
-
-    if (VulkanWrapper().vkGetDataGraphPipelineSessionBindPointRequirementsARM(backendContext->device, &bindPointReqsInfo, &numRequiredBindPoints, nullptr))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    // Query the list of bind points to which memory must be bound
-    std::vector<VkDataGraphPipelineSessionBindPointRequirementARM> bindPointRequirements(
-        numRequiredBindPoints, VkDataGraphPipelineSessionBindPointRequirementARM{VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_BIND_POINT_REQUIREMENT_ARM});
-    if (VulkanWrapper().vkGetDataGraphPipelineSessionBindPointRequirementsARM(
-            backendContext->device, &bindPointReqsInfo, &numRequiredBindPoints, bindPointRequirements.data()))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    FFX_ASSERT(numRequiredBindPoints >= 1);  // Transient bind point is required
-
-    VkMemoryRequirements2 memreqs = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, nullptr, {}};
-    for (uint32_t i = 0; i < numRequiredBindPoints; ++i)
-    {
-        if (bindPointRequirements[i].bindPoint == VK_DATA_GRAPH_PIPELINE_SESSION_BIND_POINT_TRANSIENT_ARM)
-        {
-            FFX_ASSERT(bindPointRequirements[i].bindPointType == VK_DATA_GRAPH_PIPELINE_SESSION_BIND_POINT_TYPE_MEMORY_ARM);
-
-            VkDataGraphPipelineSessionMemoryRequirementsInfoARM info = {
-                VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_MEMORY_REQUIREMENTS_INFO_ARM, nullptr, session, bindPointRequirements[i].bindPoint, 0};
-
-            VulkanWrapper().vkGetDataGraphPipelineSessionMemoryRequirementsARM(backendContext->device, &info, &memreqs);
-            break;
-        }
-    }
-
-    BackendContext_VK::Resource sessionMemoryResource = {};
-    sessionMemoryResource.memoryProperties            = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-    if (allocateDeviceMemory(backendContext, memreqs.memoryRequirements, sessionMemoryResource.memoryProperties, &sessionMemoryResource))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    pPipelineLayout->dataGraphSessionMemory     = sessionMemoryResource.deviceMemory;
-    pPipelineLayout->dataGraphSessionMemorySize = memreqs.memoryRequirements.size;
-
-    const VkBindDataGraphPipelineSessionMemoryInfoARM bindInfo = {
-        VK_STRUCTURE_TYPE_BIND_DATA_GRAPH_PIPELINE_SESSION_MEMORY_INFO_ARM,
-        nullptr,
-        session,
-        VK_DATA_GRAPH_PIPELINE_SESSION_BIND_POINT_TRANSIENT_ARM,  // binding point
-        0,                                                        // resource index
-        pPipelineLayout->dataGraphSessionMemory,
-        0  // memoryOffset
-    };
-
-    if (VulkanWrapper().vkBindDataGraphPipelineSessionMemoryARM(backendContext->device, 1, &bindInfo))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
+    // No VkPipeline: the backend owns its pipelines, descriptor sets and barriers and
+    // records them itself. The pipeline layout doubles as the identity the dispatch path
+    // recovers from FfxPipelineState::rootSignature.
+    outPipeline->pipeline      = VK_NULL_HANDLE;
+    outPipeline->rootSignature = reinterpret_cast<FfxRootSignature>(pPipelineLayout);
 
     return FFX_OK;
 }
@@ -6080,454 +5839,31 @@ FfxErrorCode CreateDataGraphPipelineVK(FfxInterface*                 backendInte
 FfxErrorCode CreateOpticalFlowPipelineVK(
     FfxInterface* backendInterface, const char* name, const FfxOpticalFlowDescription& ofDesc, FfxUInt32 effectContextId, FfxPipelineState* outPipeline)
 {
-    FFX_ASSERT(NULL != backendInterface);
-    FFX_ASSERT(NULL != outPipeline);
-
-    BackendContext_VK*                backendContext = (BackendContext_VK*)backendInterface->scratchBuffer;
-    BackendContext_VK::EffectContext& effectContext  = backendContext->pEffectContexts[effectContextId];
-
-    //////////////////////////////////////////////////////////////////////////
-    // One root signature (or pipeline layout) per pipeline
-    FFX_ASSERT_MESSAGE(effectContext.nextPipelineLayout < (effectContextId * FFX_MAX_PASS_COUNT) + FFX_MAX_PASS_COUNT,
-                       "FFXInterface: Vulkan: Ran out of pipeline layouts. Please increase FFX_MAX_PASS_COUNT");
-    BackendContext_VK::PipelineLayout* pPipelineLayout = &backendContext->pPipelineLayouts[effectContext.nextPipelineLayout++];
-
-    // Setup descriptor sets
-    VkDescriptorSetLayoutBinding layoutBindings[MAX_DESCRIPTOR_SET_LAYOUTS];
-    uint32_t                     numLayoutBindings = 0;
-
-    VkShaderStageFlags shaderStageFlags = VK_SHADER_STAGE_ALL;
-
-    const uint32_t srvBindingCount = ofDesc.srvTextureCount;
-    const uint32_t uavBindingCount = ofDesc.uavTextureCount;
-
-    const char**                  srvNames           = ofDesc.boundSRVTextureNames;
-    uint32_t*                     srvBindings        = ofDesc.boundSRVTextures;
-    uint32_t*                     srvBindCounts      = ofDesc.boundSRVTextureCounts;
-    uint32_t*                     srvSets            = ofDesc.boundSRVTextureSpaces;
-    FfxOpticalFlowConnectionType* srvConnectionTypes = ofDesc.boundSRVTextureConnectionType;
-    FfxSurfaceFormat*             srvFormats         = ofDesc.boundSRVTextureFormats;
-
-    const char**                  uavNames           = ofDesc.boundUAVTextureNames;
-    uint32_t*                     uavBindings        = ofDesc.boundUAVTextures;
-    uint32_t*                     uavBindCounts      = ofDesc.boundUAVTextureCounts;
-    uint32_t*                     uavSets            = ofDesc.boundUAVTextureSpaces;
-    FfxOpticalFlowConnectionType* uavConnectionTypes = ofDesc.boundUAVTextureConnectionType;
-    FfxSurfaceFormat*             uavFormats         = ofDesc.boundUAVTextureFormats;
-
-    // Texture SRVs
-    for (uint32_t srvIndex = 0; srvIndex < srvBindingCount; ++srvIndex)
-    {
-        layoutBindings[numLayoutBindings++] = {srvBindings[srvIndex], VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, srvBindCounts[srvIndex], shaderStageFlags, nullptr};
-    }
-
-    // Texture UAVs
-    for (uint32_t uavIndex = 0; uavIndex < uavBindingCount; ++uavIndex)
-    {
-        layoutBindings[numLayoutBindings++] = {uavBindings[uavIndex], VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, uavBindCounts[uavIndex], shaderStageFlags, nullptr};
-    }
-
-    // Create the descriptor layout
-    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
-    layoutInfo.sType                           = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount                    = numLayoutBindings;
-    layoutInfo.pBindings                       = &layoutBindings[0];
-
-    if (VulkanWrapper().vkCreateDescriptorSetLayout(backendContext->device, &layoutInfo, nullptr, &pPipelineLayout->descriptorSetLayout) != VK_SUCCESS)
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    // allocate descriptor sets
-    pPipelineLayout->descriptorSetIndex = 0;
-    for (uint32_t i = 0; i < (FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME); i++)
-    {
-        VkDescriptorSetAllocateInfo allocateInfo = {};
-        allocateInfo.sType                       = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocateInfo.descriptorPool              = backendContext->descriptorPool;
-        allocateInfo.descriptorSetCount          = 1;
-        allocateInfo.pSetLayouts                 = &pPipelineLayout->descriptorSetLayout;
-
-        // If you are getting a crash here, your bindings don't match the ones declared in the descriptor set.
-        // Check your sampler descriptions and if they correctly match the ones in your shader.
-        if (VulkanWrapper().vkAllocateDescriptorSets(backendContext->device, &allocateInfo, &pPipelineLayout->descriptorSets[i]) != VK_SUCCESS)
-        {
-            return FFX_ERROR_BACKEND_API_ERROR;
-        }
-    }
-
-    VkDescriptorSetLayout layouts[MAX_DESCRIPTOR_SET_LAYOUTS];
-    uint32_t              layoutCount = 0;
-    layouts[layoutCount++]            = pPipelineLayout->descriptorSetLayout;
-
-    // TODO: do not consider bindless resources
-
-    // create the pipeline layout
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount         = layoutCount;
-    pipelineLayoutInfo.pSetLayouts            = layouts;
-    pipelineLayoutInfo.pushConstantRangeCount = 0;
-    pipelineLayoutInfo.pPushConstantRanges    = nullptr;
-
-    if (VulkanWrapper().vkCreatePipelineLayout(backendContext->device, &pipelineLayoutInfo, nullptr, &pPipelineLayout->pipelineLayout) != VK_SUCCESS)
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    // set the root signature to pipeline
-    outPipeline->rootSignature = reinterpret_cast<FfxRootSignature>(pPipelineLayout);
-    outPipeline->cmdSignature  = nullptr;
-
-    // Create the optical flow connectivity map
-    //
-    // A node connection specifies the role of a binding (eg. search, reference, flow etc.)
-    std::vector<VkDataGraphPipelineSingleNodeConnectionARM> opticalFlowConnections;
-    // A resource info specifies the descriptor set / binding of a resource
-    std::vector<VkDataGraphPipelineResourceInfoARM> resourceInfos;
-    // An image resource info specifies image layout, attached to the corresponding resource info
-    std::vector<VkDataGraphPipelineResourceInfoImageLayoutARM> resourceImageInfos;
-
-    const uint32_t totalTextures = srvBindingCount + uavBindingCount;
-    opticalFlowConnections.reserve(totalTextures);
-    resourceInfos.reserve(totalTextures);
-    resourceImageInfos.reserve(totalTextures);
-
-    uint32_t flattenedSrvTextureCount = 0;
-
-    for (uint32_t srvIndex = 0; srvIndex < srvBindingCount; ++srvIndex)
-    {
-        const uint32_t binding   = srvBindings[srvIndex];
-        const uint32_t bindCount = srvBindCounts[srvIndex];
-        const uint32_t set       = srvSets[srvIndex];
-
-        // Note: for now we only support 1 descriptor set
-        FFX_ASSERT(set == 0);
-
-        // Note: we currently only support 1 resource per VkDataGraphPipelineResourceInfoARM, so make sure it is only 1.
-        // We might support arrays in the future so please check the latest spec if you need this functionality.
-        FFX_ASSERT(bindCount == 1);
-
-        // Set up internal state so we know how to bind the textures in the pipeline later...
-
-        uint32_t idx                                    = flattenedSrvTextureCount++;
-        outPipeline->srvTextureBindings[idx].slotIndex  = binding;
-        outPipeline->srvTextureBindings[idx].arrayIndex = 0;
-        outPipeline->srvTextureBindings[idx].bindSet    = set;
-        strncpy(outPipeline->srvTextureBindings[idx].name, srvNames[srvIndex], FFX_RESOURCE_NAME_SIZE - 1);
-        outPipeline->srvTextureBindings[idx].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-
-        // ... Then set up the optical flow connectivity map...
-
-        opticalFlowConnections.emplace_back(VkDataGraphPipelineSingleNodeConnectionARM{
-            VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SINGLE_NODE_CONNECTION_ARM,
-            nullptr,
-            set,
-            binding,
-            ffxGetVkOpticalFlowConnectionType(srvConnectionTypes[srvIndex]),  // connection type
-        });
-
-        // ... And finally the data graph resource infos
-
-        resourceImageInfos.emplace_back(VkDataGraphPipelineResourceInfoImageLayoutARM{
-            VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_RESOURCE_INFO_IMAGE_LAYOUT_ARM,
-            nullptr,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,  // srv
-        });
-
-        resourceInfos.emplace_back(VkDataGraphPipelineResourceInfoARM{
-            VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_RESOURCE_INFO_ARM,
-            nullptr,
-            set,
-            binding,
-            0,  // arrayElement, we already know that bindCount == 1 so we hardcode 0 here
-        });
-    }
-
-    outPipeline->srvTextureCount = flattenedSrvTextureCount;
-    FFX_ASSERT(outPipeline->srvTextureCount < FFX_MAX_NUM_SRVS);
-
-    uint32_t flattenedUavTextureCount = 0;
-
-    for (uint32_t uavIndex = 0; uavIndex < uavBindingCount; ++uavIndex)
-    {
-        const uint32_t binding   = uavBindings[uavIndex];
-        const uint32_t bindCount = uavBindCounts[uavIndex];
-        const uint32_t set       = uavSets[uavIndex];
-        // Note: for now we only support 1 descriptor set
-        FFX_ASSERT(set == 0);
-
-        // Note: we currently only support 1 resource per VkDataGraphPipelineResourceInfoARM, so make sure it is only 1.
-        // We might support arrays in the future so please check the latest spec if you need this functionality.
-        FFX_ASSERT(bindCount == 1);
-
-        // Set up internal state so we know how to bind the textures in the pipeline later...
-
-        uint32_t idx                                    = flattenedUavTextureCount++;
-        outPipeline->uavTextureBindings[idx].slotIndex  = binding;
-        outPipeline->uavTextureBindings[idx].arrayIndex = 0;
-        outPipeline->uavTextureBindings[idx].bindSet    = set;
-        strncpy(outPipeline->uavTextureBindings[idx].name, uavNames[uavIndex], FFX_RESOURCE_NAME_SIZE - 1);
-        outPipeline->uavTextureBindings[idx].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-
-        // ... Then set up the optical flow connectivity map...
-
-        opticalFlowConnections.emplace_back(VkDataGraphPipelineSingleNodeConnectionARM{
-            VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SINGLE_NODE_CONNECTION_ARM,
-            nullptr,
-            set,
-            binding,
-            ffxGetVkOpticalFlowConnectionType(uavConnectionTypes[uavIndex]),  // connection type
-        });
-
-        // ... And finally the data graph resource infos
-
-        resourceImageInfos.emplace_back(VkDataGraphPipelineResourceInfoImageLayoutARM{
-            VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_RESOURCE_INFO_IMAGE_LAYOUT_ARM,
-            nullptr,
-            VK_IMAGE_LAYOUT_GENERAL,  // uav
-        });
-
-        resourceInfos.emplace_back(VkDataGraphPipelineResourceInfoARM{
-            VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_RESOURCE_INFO_ARM,
-            nullptr,
-            set,
-            binding,
-            0,  // arrayElement, we already know that bindCount == 1 so we hardcode 0 here
-        });
-    }
-
-    // Pushing back into resourceImageInfo even if it has been .reserve()'d results in a reallocation, therefore
-    // the pointers get invalidated...
-    // TODO: There should be a way to guarantee we are not ever reallocating and the .pNext values stay valid,
-    // so we don't need to do these second loops.
-    for (uint32_t srvIndex = 0; srvIndex < srvBindingCount; ++srvIndex)
-    {
-        resourceInfos[srvIndex].pNext = &resourceImageInfos[srvIndex];
-    }
-
-    for (uint32_t uavIndex = 0; uavIndex < uavBindingCount; ++uavIndex)
-    {
-        resourceInfos[uavIndex + flattenedSrvTextureCount].pNext = &resourceImageInfos[uavIndex + flattenedSrvTextureCount];
-    }
-
-    outPipeline->uavTextureCount = flattenedUavTextureCount;
-    FFX_ASSERT(outPipeline->uavTextureCount < FFX_MAX_NUM_UAVS);
-    outPipeline->srvTensorCount = 0;
-    outPipeline->uavTensorCount = 0;
-
-    pPipelineLayout->effectContextId = effectContextId;
-
-    VkDataGraphPipelineSingleNodeCreateInfoARM connectivityMap{};
-    connectivityMap.sType           = VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SINGLE_NODE_CREATE_INFO_ARM;
-    connectivityMap.pNext           = nullptr;
-    connectivityMap.nodeType        = VK_DATA_GRAPH_PIPELINE_NODE_TYPE_OPTICAL_FLOW_ARM;
-    connectivityMap.connectionCount = static_cast<uint32_t>(opticalFlowConnections.size());
-    connectivityMap.pConnections    = opticalFlowConnections.data();
-
-    // Optical flow configuration
-    VkDataGraphOpticalFlowCreateFlagsARM ofFlags = 0;
-    VkFormat                             image_format{VK_FORMAT_UNDEFINED};
-    // cost map is optional, so default to valid format incase no cost map is specified
-    VkFormat cost_format{VK_FORMAT_R16_UINT};
-    VkFormat flow_format{VK_FORMAT_UNDEFINED};
-
-    for (uint32_t i = 0; i < outPipeline->srvTextureCount; i++)
-    {
-        switch (srvConnectionTypes[i])
-        {
-        case FFX_OPTICAL_FLOW_CONNECTION_INPUT:
-        {
-            image_format = ffxGetVkFormatFromSurfaceFormat(srvFormats[i]);
-            break;
-        }
-        case FFX_OPTICAL_FLOW_CONNECTION_HINT:
-            ofFlags |= VK_DATA_GRAPH_OPTICAL_FLOW_CREATE_ENABLE_HINT_BIT_ARM;
-            break;
-        default:
-            break;
-        }
-    }
-
-    for (uint32_t i = 0; i < outPipeline->uavTextureCount; i++)
-    {
-        switch (uavConnectionTypes[i])
-        {
-        case FFX_OPTICAL_FLOW_CONNECTION_COST:
-            cost_format = ffxGetVkFormatFromSurfaceFormat(uavFormats[i]);
-            ofFlags |= VK_DATA_GRAPH_OPTICAL_FLOW_CREATE_ENABLE_COST_BIT_ARM;
-            break;
-        case FFX_OPTICAL_FLOW_CONNECTION_FLOW_VECTOR:
-            flow_format = ffxGetVkFormatFromSurfaceFormat(uavFormats[i]);
-            break;
-        case FFX_OPTICAL_FLOW_CONNECTION_BACKWARD_FLOW_VECTOR:
-        case FFX_OPTICAL_FLOW_CONNECTION_BACKWARD_COST:
-            FFX_ASSERT_MESSAGE(false, "Backward flow/cost are no longer supported by VK_ARM_data_graph_optical_flow");
-            break;
-        default:
-            break;
-        }
-    }
-
-    VkDataGraphPipelineOpticalFlowCreateInfoARM ofCreateInfo{};
-    ofCreateInfo.sType            = VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_OPTICAL_FLOW_CREATE_INFO_ARM;
-    ofCreateInfo.pNext            = &connectivityMap;
-    ofCreateInfo.width            = ofDesc.dimensions.width;
-    ofCreateInfo.height           = ofDesc.dimensions.height;
-    ofCreateInfo.imageFormat      = image_format;
-    ofCreateInfo.flowVectorFormat = flow_format;
-    ofCreateInfo.costFormat       = cost_format;
-    ofCreateInfo.outputGridSize   = ffxGetVkOpticalFlowGridSize(ofDesc.gridSize);
-    ofCreateInfo.hintGridSize     = ffxGetVkOpticalFlowGridSize(ofDesc.gridSize);
-    ofCreateInfo.performanceLevel = ffxGetVkOpticalFlowPerformanceLevel(ofDesc.performanceLevel);
-    ofCreateInfo.flags            = ofFlags;
-
-    // create the data graph pipeline
-    VkDataGraphPipelineCreateInfoARM pipelineCreateInfo = {
-        VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_CREATE_INFO_ARM,
-        &ofCreateInfo,
-        0,                                            // flags
-        pPipelineLayout->pipelineLayout,              // layout
-        static_cast<uint32_t>(resourceInfos.size()),  // resourceInfoCount
-        resourceInfos.data(),                         // pResourceInfos
-    };
-
-    VkPipeline dataGraphPipeline = VK_NULL_HANDLE;
-    if (VulkanWrapper().vkCreateDataGraphPipelinesARM(
-            backendContext->device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &dataGraphPipeline) != VK_SUCCESS)
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    // set the pipeline
-    outPipeline->pipeline = reinterpret_cast<FfxPipeline>(dataGraphPipeline);
-
-    // Setup the pipeline name
-    strncpy(outPipeline->name, name, FFX_RESOURCE_NAME_SIZE - 1);
-    outPipeline->name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-
-    const VkDataGraphPipelineSessionCreateInfoARM sessionCreateInfo = {VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_CREATE_INFO_ARM,
-                                                                       nullptr,
-                                                                       VK_DATA_GRAPH_PIPELINE_SESSION_CREATE_OPTICAL_FLOW_CACHE_BIT_ARM,
-                                                                       dataGraphPipeline};
-
-    VkDataGraphPipelineSessionARM session;
-    if (VulkanWrapper().vkCreateDataGraphPipelineSessionARM(backendContext->device, &sessionCreateInfo, nullptr, &session))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    outPipeline->session = reinterpret_cast<FfxDataGraphPipelineSession>(session);
-
-    uint32_t                                               numRequiredBindPoints = 0;
-    VkDataGraphPipelineSessionBindPointRequirementsInfoARM bindPointReqsInfo     = {
-        VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_BIND_POINT_REQUIREMENTS_INFO_ARM, nullptr, session};
-
-    if (VulkanWrapper().vkGetDataGraphPipelineSessionBindPointRequirementsARM(backendContext->device, &bindPointReqsInfo, &numRequiredBindPoints, nullptr))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    std::vector<VkDataGraphPipelineSessionBindPointRequirementARM> bindPointRequirements(
-        numRequiredBindPoints, VkDataGraphPipelineSessionBindPointRequirementARM{VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_BIND_POINT_REQUIREMENT_ARM});
-    if (VulkanWrapper().vkGetDataGraphPipelineSessionBindPointRequirementsARM(
-            backendContext->device, &bindPointReqsInfo, &numRequiredBindPoints, bindPointRequirements.data()))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    std::vector<SessionMemoryObjectRequirement> memoryObjectRequirements{};
-    memoryObjectRequirements.reserve(numRequiredBindPoints);
-
-    VkMemoryRequirements unionMemReq{};
-    unionMemReq.size           = 0;
-    unionMemReq.alignment      = 1;
-    unionMemReq.memoryTypeBits = 0xFFFFFFFFu;
-    bool hasMemoryBindPoint    = false;
-
-    for (uint32_t i = 0; i < numRequiredBindPoints; ++i)
-    {
-        const auto& req = bindPointRequirements[i];
-
-        if (req.bindPointType != VK_DATA_GRAPH_PIPELINE_SESSION_BIND_POINT_TYPE_MEMORY_ARM)
-            continue;
-
-        for (uint32_t objectIndex = 0; objectIndex < req.numObjects; ++objectIndex)
-        {
-            VkDataGraphPipelineSessionMemoryRequirementsInfoARM memReqInfo = {
-                VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_MEMORY_REQUIREMENTS_INFO_ARM, nullptr, session, req.bindPoint, objectIndex};
-            VkMemoryRequirements2 memreqs = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, nullptr, {}};
-
-            VulkanWrapper().vkGetDataGraphPipelineSessionMemoryRequirementsARM(backendContext->device, &memReqInfo, &memreqs);
-
-            hasMemoryBindPoint    = true;
-            unionMemReq.size      = (std::max)(unionMemReq.size, memreqs.memoryRequirements.size);
-            unionMemReq.alignment = (std::max)(unionMemReq.alignment, memreqs.memoryRequirements.alignment);
-            unionMemReq.memoryTypeBits &= memreqs.memoryRequirements.memoryTypeBits;
-            memoryObjectRequirements.push_back(SessionMemoryObjectRequirement{req.bindPoint, objectIndex, memreqs.memoryRequirements, 0});
-        }
-    }
-
-    if (!hasMemoryBindPoint)
-    {
-        FFX_ASSERT_MESSAGE(false, "Optical flow pipeline session has no memory bind points");
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    if (unionMemReq.memoryTypeBits == 0)
-    {
-        FFX_ASSERT_MESSAGE(false, "Optical flow pipeline session memory bind points have incompatible memoryTypeBits");
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    auto alignUp = [](VkDeviceSize value, VkDeviceSize alignment) -> VkDeviceSize {
-        if (alignment <= 1)
-        {
-            return value;
-        }
-        const VkDeviceSize remainder = value % alignment;
-        return remainder == 0 ? value : (value + (alignment - remainder));
-    };
-
-    VkDeviceSize totalSessionMemorySize = 0;
-    VkDeviceSize maxSessionAlignment    = 1;
-    for (auto& req : memoryObjectRequirements)
-    {
-        totalSessionMemorySize = alignUp(totalSessionMemorySize, req.memoryRequirements.alignment);
-        req.offset             = totalSessionMemorySize;
-        totalSessionMemorySize += req.memoryRequirements.size;
-        maxSessionAlignment = maxSessionAlignment > req.memoryRequirements.alignment ? maxSessionAlignment : req.memoryRequirements.alignment;
-    }
-
-    unionMemReq.size      = totalSessionMemorySize;
-    unionMemReq.alignment = maxSessionAlignment;
-
-    BackendContext_VK::Resource sessionMemoryResource = {};
-    sessionMemoryResource.memoryProperties            = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    if (allocateDeviceMemory(backendContext, unionMemReq, sessionMemoryResource.memoryProperties, &sessionMemoryResource))
-    {
-        return FFX_ERROR_BACKEND_API_ERROR;
-    }
-
-    pPipelineLayout->dataGraphSessionMemory     = sessionMemoryResource.deviceMemory;
-    pPipelineLayout->dataGraphSessionMemorySize = unionMemReq.size;
-
-    for (const auto& req : memoryObjectRequirements)
-    {
-        const VkBindDataGraphPipelineSessionMemoryInfoARM bindInfo = {VK_STRUCTURE_TYPE_BIND_DATA_GRAPH_PIPELINE_SESSION_MEMORY_INFO_ARM,
-                                                                      nullptr,
-                                                                      session,
-                                                                      req.bindPoint,
-                                                                      req.objectIndex,
-                                                                      pPipelineLayout->dataGraphSessionMemory,
-                                                                      req.offset};
-        if (VulkanWrapper().vkBindDataGraphPipelineSessionMemoryARM(backendContext->device, 1, &bindInfo))
-        {
-            return FFX_ERROR_BACKEND_API_ERROR;
-        }
-    }
-
-    return FFX_OK;
+    /*
+     * Vulkan optical flow is NOT AVAILABLE in this build.
+     *
+     * This fork implemented optical flow as a VK_ARM_data_graph_optical_flow pipeline:
+     * vkCreateDataGraphPipelinesARM, a data-graph session bound to its own device
+     * memory, then vkCmdDispatchDataGraphARM with a
+     * VkDataGraphPipelineOpticalFlowDispatchInfoARM. That entire execution path has been
+     * removed -- the NFRU inference graph now runs on the portable dp4a backend, and the
+     * VK_ARM_data_graph entry points are no longer even resolved by the loader.
+     *
+     * The dp4a backend has no optical-flow equivalent: it is an int8 convolution graph.
+     * FSR3's compute-shader optical flow, which this fork replaced with the Arm data
+     * graph, is intact in AMD's FidelityFX SDK 1.1.3 that this tree derives from;
+     * restoring it is the way to bring Vulkan optical flow back.
+     *
+     * Reporting unsupported here is consistent with the capability query, which now
+     * reports deviceCapabilities->dataGraphOFSupported == false, so a caller that checks
+     * capabilities first never reaches this point.
+     */
+    (void)backendInterface;
+    (void)name;
+    (void)ofDesc;
+    (void)effectContextId;
+    (void)outPipeline;
+    return FFX_ERROR_BACKEND_API_ERROR;
 }
 
 FfxErrorCode DestroyPipelineVK(FfxInterface* backendInterface, FfxPipelineState* pipeline, FfxUInt32 effectContextId)
@@ -6539,17 +5875,11 @@ FfxErrorCode DestroyPipelineVK(FfxInterface* backendInterface, FfxPipelineState*
     if (!pipeline)
         return FFX_OK;
 
-    // DATA GRAPH: `FfxPipelineState::session` is the Data Graph session handle (see FfxPipelineState in ffx_types.h).
-    // Evidence in this backend:
-    // - Set in CreateDataGraphPipelineVK via vkCreateDataGraphPipelineSessionARM.
-    // - Used at dispatch time: vkCmdDispatchDataGraphARM(..., (VkDataGraphPipelineSessionARM)pipeline.session, ...).
-    // Therefore it must be explicitly destroyed; otherwise internal allocations can survive until vkDestroyDevice.
-    if (pipeline->session != VK_NULL_HANDLE)
-    {
-        VkDataGraphPipelineSessionARM session = reinterpret_cast<VkDataGraphPipelineSessionARM>(pipeline->session);
-        VulkanWrapper().vkDestroyDataGraphPipelineSessionARM(backendContext->device, session, nullptr);
-        pipeline->session = VK_NULL_HANDLE;
-    }
+    // Data-graph pipelines no longer exist: FfxPipelineState::session is never set, and
+    // CreateDataGraphPipelineVK now stores a dp4a context in the pipeline LAYOUT instead
+    // (released with the layout, below). Nothing to destroy here.
+    FFX_ASSERT_MESSAGE(pipeline->session == VK_NULL_HANDLE,
+                       "a data-graph session handle survived, but the data-graph path is gone");
 
     // Destroy the pipeline
     VkPipeline vkPipeline = reinterpret_cast<VkPipeline>(pipeline->pipeline);
@@ -6567,11 +5897,18 @@ FfxErrorCode DestroyPipelineVK(FfxInterface* backendInterface, FfxPipelineState*
 
     if (pPipelineLayout)
     {
-        if (pPipelineLayout->dataGraphSessionMemory != VK_NULL_HANDLE)
+        /*
+         * Release the dp4a context that CreateDataGraphPipelineVK built for this layout.
+         *
+         * This replaces freeing a VkDataGraphPipelineSessionARM's device memory. The
+         * backend owns its own pipelines, descriptor sets, weight buffers and scratch, so
+         * destroying the context is the whole teardown -- and it must happen here rather
+         * than at device destruction, because a context is per data-graph pipeline.
+         */
+        if (pPipelineLayout->dataGraphDp4a != nullptr)
         {
-            VulkanWrapper().vkFreeMemory(backendContext->device, pPipelineLayout->dataGraphSessionMemory, nullptr);
-            pPipelineLayout->dataGraphSessionMemory     = VK_NULL_HANDLE;
-            pPipelineLayout->dataGraphSessionMemorySize = 0;
+            nfruDp4aDestroyContext(pPipelineLayout->dataGraphDp4a);
+            pPipelineLayout->dataGraphDp4a = nullptr;
         }
 
         // Descriptor set layout
@@ -7420,218 +6757,153 @@ static FfxErrorCode executeGpuJobDataGraph(BackendContext_VK* backendContext, Ff
         reinterpret_cast<BackendContext_VK::PipelineLayout*>(job->dataGraphJobDescription.pipeline.rootSignature);
     FFX_ASSERT(pipelineLayout->effectContextId < backendContext->maxEffectContexts);
 
-    const BackendContext_VK::EffectContext& effectContext = backendContext->pEffectContexts[pipelineLayout->effectContextId];
-
-    uint32_t             descriptorWriteIndex = 0;
-    VkWriteDescriptorSet writeDescriptorSets[FFX_MAX_RESOURCE_COUNT];
-
-    uint32_t                      tensorDescriptorIndex = 0;
-    VkWriteDescriptorSetTensorARM tensorDescriptorInfos[FFX_MAX_RESOURCE_COUNT];
-    for (int i = 0; i < FFX_MAX_RESOURCE_COUNT; ++i)
-        tensorDescriptorInfos[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_TENSOR_ARM, nullptr};
-
-    // These MUST be initialized
-    uint32_t              imageDescriptorIndex = 0;
-    VkDescriptorImageInfo imageDescriptorInfos[FFX_MAX_RESOURCE_COUNT];
-    for (int i = 0; i < FFX_MAX_RESOURCE_COUNT; ++i)
-        imageDescriptorInfos[i] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-
-    // The data graph pipeline only bind the tensor resources and potentially texture resoruces for data graph optical flow
-    FFX_ASSERT(job->dataGraphJobDescription.pipeline.srvBufferCount == 0);
-    FFX_ASSERT(job->dataGraphJobDescription.pipeline.uavBufferCount == 0);
-    FFX_ASSERT(job->dataGraphJobDescription.pipeline.staticTextureSrvCount == 0);
-    FFX_ASSERT(job->dataGraphJobDescription.pipeline.staticBufferSrvCount == 0);
-    FFX_ASSERT(job->dataGraphJobDescription.pipeline.staticTextureUavCount == 0);
-    FFX_ASSERT(job->dataGraphJobDescription.pipeline.staticBufferUavCount == 0);
-    FFX_ASSERT(job->dataGraphJobDescription.pipeline.rtCount == 0);
-
-    // bind texture UAVs
-    for (uint32_t currentPipelineUavIndex = 0; currentPipelineUavIndex < job->dataGraphJobDescription.pipeline.uavTextureCount; ++currentPipelineUavIndex)
+    /*
+     * The data graph is now an int8 dp4a compute graph that the backend records itself.
+     * Nothing here is a Vulkan data-graph object any more: no data-graph pipeline, no
+     * session, no tensor descriptors, no VkDataGraphPipelineDispatchInfoARM, and no
+     * vkCmdDispatchDataGraphARM.
+     *
+     * The tensors the effect bound are still VK_ARM tensor resources, but every one of
+     * them is buffer-aliased -- ffxCreateResource gives a buffer-backed tensor an
+     * `aliasedTensorBufferResource` -- so the int8 payload the dp4a kernels read is
+     * reachable as an ordinary VkBuffer. That buffer is the entire bridge between the
+     * SDK's resource model and the portable backend.
+     */
+    /*
+     * NSS first: a different network with its own kernels and outputs, and its context is
+     * built lazily because it needs this command buffer to upload its weights.
+     */
+    if (strcmp(pipelineLayout->dataGraphEntryPoint, "nss_v1_0_1_high_int8") == 0 ||
+        strcmp(pipelineLayout->dataGraphEntryPoint, "nss_v1_0_1_mid_low_int8") == 0)
     {
-        FfxTextureUAV& textureUAV = job->dataGraphJobDescription.uavTextures[currentPipelineUavIndex];
+        NssDp4aContext* nss = pipelineLayout->dataGraphNss;
+        if (nss != nullptr)
+        {
+            /*
+             * Release the previous frame's staging buffers. They back the weight uploads
+             * recorded into the previous frame's command buffer, and may only be freed once
+             * that submission has completed.
+             *
+             * The SDK has no submission hook -- the host calls ffxExecuteGpuJobs and then
+             * submits itself -- so the next call here is the earliest point observable from
+             * inside the backend, and it is a frame boundary in any frame-paced host. The
+             * failure mode is a use-after-free, so it is stated rather than assumed.
+             */
+            nssDp4aFlushPendingUploads(nss);
+        }
+        else
+        {
+            NssDp4aCreateInfo ci = pipelineLayout->dataGraphNssCreateInfo;
+            ci.uploadCommandBuffer = (uint64_t)vkCommandBuffer;
+            if (nssDp4aCreateContext(&ci, &nss) != NSS_DP4A_OK)
+            {
+                FFX_ASSERT_MESSAGE(false, "nssDp4aCreateContext failed");
+                return FFX_ERROR_BACKEND_API_ERROR;
+            }
+            pipelineLayout->dataGraphNss = nss;
+        }
 
-        // continue if this is a null resource.
-        if (job->dataGraphJobDescription.uavTextures[currentPipelineUavIndex].resource.internalIndex == 0)
-            continue;
+        FFX_ASSERT_MESSAGE(job->dataGraphJobDescription.pipeline.srvTensorCount >= 1,
+                           "the NSS dp4a graph takes one input tensor");
+        FFX_ASSERT_MESSAGE(job->dataGraphJobDescription.pipeline.uavTensorCount >= 2,
+                           "the NSS dp4a graph produces KPN and temporal feedback");
 
-        addBarrier(backendContext, &textureUAV.resource, FFX_RESOURCE_STATE_DATA_GRAPH_WRITE);
+        FfxTensor& inTensor  = job->dataGraphJobDescription.srvTensors[0];
+        FfxTensor& kpnTensor = job->dataGraphJobDescription.uavTensors[0];
+        FfxTensor& tmpTensor = job->dataGraphJobDescription.uavTensors[1];
 
-        const FfxResourceBinding binding = job->dataGraphJobDescription.pipeline.uavTextureBindings[currentPipelineUavIndex];
+        addBarrier(backendContext, &inTensor.resource,  FFX_RESOURCE_STATE_DATA_GRAPH_READ);
+        addBarrier(backendContext, &kpnTensor.resource, FFX_RESOURCE_STATE_DATA_GRAPH_WRITE);
+        addBarrier(backendContext, &tmpTensor.resource, FFX_RESOURCE_STATE_DATA_GRAPH_WRITE);
+        flushBarriers(backendContext, vkCommandBuffer);
 
-        // where to bind it
-        const uint32_t currentUavResourceIndex = job->dataGraphJobDescription.pipeline.uavTextureBindings[currentPipelineUavIndex].slotIndex;
+        /* Same bridge as NFRU: the tensors are buffer-aliased, so the int8 payload is an
+         * ordinary VkBuffer and nothing else has to be prepared. */
+        const VkBuffer inBuffer  = backendContext->pResources[inTensor.resource.internalIndex].aliasedTensorBufferResource;
+        const VkBuffer kpnBuffer = backendContext->pResources[kpnTensor.resource.internalIndex].aliasedTensorBufferResource;
+        const VkBuffer tmpBuffer = backendContext->pResources[tmpTensor.resource.internalIndex].aliasedTensorBufferResource;
+        FFX_ASSERT_MESSAGE(inBuffer != VK_NULL_HANDLE && kpnBuffer != VK_NULL_HANDLE && tmpBuffer != VK_NULL_HANDLE,
+                           "an NSS data-graph tensor is not buffer-aliased, so the dp4a backend cannot reach its storage");
 
-        // source: UAV of resource to bind
-        const uint32_t resourceIndex = textureUAV.resource.internalIndex;
-        uint32_t       mipOffset     = textureUAV.mip;
-        if (textureUAV.mip >= backendContext->pResources[resourceIndex].resourceDescription.mipCount)
-            mipOffset = backendContext->pResources[resourceIndex].resourceDescription.mipCount - 1;
-        const uint32_t uavViewIndex = backendContext->pResources[resourceIndex].uavViewIndex + mipOffset;
+        const uint32_t width  = pipelineLayout->dataGraphWidth;
+        const uint32_t height = pipelineLayout->dataGraphHeight;
+        const uint32_t kpnChannels =
+            (pipelineLayout->dataGraphNssCreateInfo.quality == NSS_DP4A_QUALITY_HIGH) ? 36u : 16u;
 
-        writeDescriptorSets[descriptorWriteIndex]        = {};
-        writeDescriptorSets[descriptorWriteIndex].sType  = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writeDescriptorSets[descriptorWriteIndex].dstSet = pipelineLayout->descriptorSets[pipelineLayout->descriptorSetIndex];
+        NssDp4aDispatchInfo di = {};
+        di.input.buffer          = (uint64_t)inBuffer;
+        di.input.offset          = 0;
+        di.input.size            = (uint64_t)width * height * 12u;          /* int8 NHWC, 12ch */
+        di.outputKpn.buffer      = (uint64_t)kpnBuffer;
+        di.outputKpn.offset      = 0;
+        di.outputKpn.size        = (uint64_t)(width / 4u) * (height / 4u) * kpnChannels;
+        di.outputTemporal.buffer = (uint64_t)tmpBuffer;
+        di.outputTemporal.offset = 0;
+        di.outputTemporal.size   = (uint64_t)width * height * 4u;           /* 4ch feedback */
+        di.width                 = width;
+        di.height                = height;
 
-        writeDescriptorSets[descriptorWriteIndex].descriptorCount = 1;
-        writeDescriptorSets[descriptorWriteIndex].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writeDescriptorSets[descriptorWriteIndex].pImageInfo      = &imageDescriptorInfos[imageDescriptorIndex];
-        writeDescriptorSets[descriptorWriteIndex].dstBinding      = binding.slotIndex;
-        writeDescriptorSets[descriptorWriteIndex].dstArrayElement = binding.arrayIndex;
-
-        imageDescriptorInfos[imageDescriptorIndex]             = {};
-        imageDescriptorInfos[imageDescriptorIndex].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        imageDescriptorInfos[imageDescriptorIndex].imageView   = backendContext->pResourceViews[uavViewIndex].imageView;
-
-        imageDescriptorIndex++;
-        descriptorWriteIndex++;
+        if (nssDp4aRecord(nss, (uint64_t)vkCommandBuffer, &di) != NSS_DP4A_OK)
+        {
+            return FFX_ERROR_BACKEND_API_ERROR;
+        }
+        return FFX_OK;
     }
 
-    // bind texture SRVs
-    for (uint32_t currentPipelineSrvIndex = 0; currentPipelineSrvIndex < job->dataGraphJobDescription.pipeline.srvTextureCount; ++currentPipelineSrvIndex)
+    NfruDp4aContext* dp4a = pipelineLayout->dataGraphDp4a;
+    if (dp4a == nullptr)
     {
-        FfxTextureSRV& textureSRV = job->dataGraphJobDescription.srvTextures[currentPipelineSrvIndex];
-
-        // continue if this is a null resource.
-        if (job->dataGraphJobDescription.srvTextures[currentPipelineSrvIndex].resource.internalIndex == 0)
-            continue;
-
-        addBarrier(backendContext, &textureSRV.resource, FFX_RESOURCE_STATE_DATA_GRAPH_READ);
-
-        const FfxResourceBinding binding = job->dataGraphJobDescription.pipeline.srvTextureBindings[currentPipelineSrvIndex];
-
-        // where to bind it
-        const uint32_t currentSrvResourceIndex = job->dataGraphJobDescription.pipeline.srvTextureBindings[currentPipelineSrvIndex].slotIndex;
-
-        writeDescriptorSets[descriptorWriteIndex]                 = {};
-        writeDescriptorSets[descriptorWriteIndex].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writeDescriptorSets[descriptorWriteIndex].dstSet          = pipelineLayout->descriptorSets[pipelineLayout->descriptorSetIndex];
-        writeDescriptorSets[descriptorWriteIndex].descriptorCount = 1;
-        writeDescriptorSets[descriptorWriteIndex].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        writeDescriptorSets[descriptorWriteIndex].pImageInfo      = &imageDescriptorInfos[imageDescriptorIndex];
-        writeDescriptorSets[descriptorWriteIndex].dstBinding      = binding.slotIndex;
-        writeDescriptorSets[descriptorWriteIndex].dstArrayElement = binding.arrayIndex;
-
-        const uint32_t resourceIndex = textureSRV.resource.internalIndex;
-        const uint32_t srvViewIndex  = backendContext->pResources[resourceIndex].srvViewIndex;
-
-        imageDescriptorInfos[imageDescriptorIndex]             = {};
-        imageDescriptorInfos[imageDescriptorIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageDescriptorInfos[imageDescriptorIndex].imageView   = backendContext->pResourceViews[srvViewIndex].imageView;
-
-        imageDescriptorIndex++;
-        descriptorWriteIndex++;
+        // The model was refused at pipeline creation because this backend does not
+        // implement it. Fail loudly: falling through would run the wrong weights.
+        FFX_ASSERT_MESSAGE(false, "This data-graph model has no dp4a implementation (see CreateDataGraphPipelineVK)");
+        return FFX_ERROR_BACKEND_API_ERROR;
     }
 
-    // bind tensor UAVs
-    for (uint32_t currentPipelineUavIndex = 0; currentPipelineUavIndex < job->dataGraphJobDescription.pipeline.uavTensorCount; ++currentPipelineUavIndex)
-    {
-        FfxTensor& tensor = job->dataGraphJobDescription.uavTensors[currentPipelineUavIndex];
+    FFX_ASSERT_MESSAGE(job->dataGraphJobDescription.pipeline.srvTensorCount >= 1,
+                       "the dp4a data graph takes at least one input tensor");
+    FFX_ASSERT_MESSAGE(job->dataGraphJobDescription.pipeline.uavTensorCount >= 1,
+                       "the dp4a data graph produces at least one output tensor");
 
-        // continue if this is a null resource.
-        if (tensor.resource.internalIndex == 0)
-            continue;
+    FfxTensor& inTensor  = job->dataGraphJobDescription.srvTensors[0];
+    FfxTensor& outTensor = job->dataGraphJobDescription.uavTensors[0];
 
-        addBarrier(backendContext, &tensor.resource, FFX_RESOURCE_STATE_DATA_GRAPH_WRITE);
+    FFX_ASSERT(inTensor.resource.internalIndex != 0 && outTensor.resource.internalIndex != 0);
 
-        const FfxResourceBinding binding = job->dataGraphJobDescription.pipeline.uavTensorBindings[currentPipelineUavIndex];
-
-        const uint32_t resourceIndex   = job->dataGraphJobDescription.uavTensors[currentPipelineUavIndex].resource.internalIndex;
-        const uint32_t tensorViewIndex = backendContext->pResources[resourceIndex].tensorViewIndex;
-
-        writeDescriptorSets[descriptorWriteIndex]                 = {};
-        writeDescriptorSets[descriptorWriteIndex].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writeDescriptorSets[descriptorWriteIndex].pNext           = &tensorDescriptorInfos[tensorDescriptorIndex];
-        writeDescriptorSets[descriptorWriteIndex].dstSet          = pipelineLayout->descriptorSets[pipelineLayout->descriptorSetIndex];
-        writeDescriptorSets[descriptorWriteIndex].descriptorCount = 1;
-        writeDescriptorSets[descriptorWriteIndex].descriptorType  = VK_DESCRIPTOR_TYPE_TENSOR_ARM;
-        writeDescriptorSets[descriptorWriteIndex].dstBinding      = binding.slotIndex;
-        writeDescriptorSets[descriptorWriteIndex].dstArrayElement = binding.arrayIndex;
-
-        tensorDescriptorInfos[tensorDescriptorIndex].tensorViewCount = 1;
-        tensorDescriptorInfos[tensorDescriptorIndex].pTensorViews    = &backendContext->pResourceViews[tensorViewIndex].tensorView;
-
-        tensorDescriptorIndex++;
-        descriptorWriteIndex++;
-    }
-
-    // bind tensor SRVs
-    for (uint32_t currentPipelineSrvIndex = 0; currentPipelineSrvIndex < job->dataGraphJobDescription.pipeline.srvTensorCount; ++currentPipelineSrvIndex)
-    {
-        FfxTensor& tensor = job->dataGraphJobDescription.srvTensors[currentPipelineSrvIndex];
-
-        // continue if this is a null resource.
-        if (tensor.resource.internalIndex == 0)
-            continue;
-
-        addBarrier(backendContext, &tensor.resource, FFX_RESOURCE_STATE_DATA_GRAPH_READ);
-
-        const FfxResourceBinding binding = job->dataGraphJobDescription.pipeline.srvTensorBindings[currentPipelineSrvIndex];
-
-        const uint32_t resourceIndex   = job->dataGraphJobDescription.srvTensors[currentPipelineSrvIndex].resource.internalIndex;
-        const uint32_t tensorViewIndex = backendContext->pResources[resourceIndex].tensorViewIndex;
-
-        writeDescriptorSets[descriptorWriteIndex]                 = {};
-        writeDescriptorSets[descriptorWriteIndex].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writeDescriptorSets[descriptorWriteIndex].pNext           = &tensorDescriptorInfos[tensorDescriptorIndex];
-        writeDescriptorSets[descriptorWriteIndex].dstSet          = pipelineLayout->descriptorSets[pipelineLayout->descriptorSetIndex];
-        writeDescriptorSets[descriptorWriteIndex].descriptorCount = 1;
-        writeDescriptorSets[descriptorWriteIndex].descriptorType  = VK_DESCRIPTOR_TYPE_TENSOR_ARM;
-        writeDescriptorSets[descriptorWriteIndex].dstBinding      = binding.slotIndex;
-        writeDescriptorSets[descriptorWriteIndex].dstArrayElement = binding.arrayIndex;
-
-        tensorDescriptorInfos[tensorDescriptorIndex].tensorViewCount = 1;
-        tensorDescriptorInfos[tensorDescriptorIndex].pTensorViews    = &backendContext->pResourceViews[tensorViewIndex].tensorView;
-
-        tensorDescriptorIndex++;
-        descriptorWriteIndex++;
-    }
-
-    // insert all the barriers
+    /*
+     * Tensor resources use their own state pair (FFX_RESOURCE_STATE_DATA_GRAPH_READ /
+     * _WRITE). Those enums predate the dp4a path but map cleanly onto what a compute
+     * shader needs, and reusing them keeps the barrier bookkeeping consistent with the
+     * rest of the backend rather than inventing a parallel scheme.
+     */
+    addBarrier(backendContext, &inTensor.resource, FFX_RESOURCE_STATE_DATA_GRAPH_READ);
+    addBarrier(backendContext, &outTensor.resource, FFX_RESOURCE_STATE_DATA_GRAPH_WRITE);
     flushBarriers(backendContext, vkCommandBuffer);
 
-    // update all uavs and srvs
-    VulkanWrapper().vkUpdateDescriptorSets(backendContext->device, descriptorWriteIndex, writeDescriptorSets, 0, nullptr);
+    const VkBuffer inBuffer  = backendContext->pResources[inTensor.resource.internalIndex].aliasedTensorBufferResource;
+    const VkBuffer outBuffer = backendContext->pResources[outTensor.resource.internalIndex].aliasedTensorBufferResource;
+    FFX_ASSERT_MESSAGE(inBuffer != VK_NULL_HANDLE && outBuffer != VK_NULL_HANDLE,
+                       "a data-graph tensor is not buffer-aliased, so the dp4a backend cannot reach its storage");
 
-    // bind pipeline
-    VulkanWrapper().vkCmdBindPipeline(
-        vkCommandBuffer, VK_PIPELINE_BIND_POINT_DATA_GRAPH_ARM, reinterpret_cast<VkPipeline>(job->dataGraphJobDescription.pipeline.pipeline));
+    const uint32_t width  = pipelineLayout->dataGraphWidth;
+    const uint32_t height = pipelineLayout->dataGraphHeight;
 
-    // bind descriptor sets
-    VulkanWrapper().vkCmdBindDescriptorSets(vkCommandBuffer,
-                                            VK_PIPELINE_BIND_POINT_DATA_GRAPH_ARM,
-                                            pipelineLayout->pipelineLayout,
-                                            0,
-                                            1,
-                                            &pipelineLayout->descriptorSets[pipelineLayout->descriptorSetIndex],
-                                            0,
-                                            nullptr);
+    NfruDp4aDispatchInfo di = {};
+    di.input.buffer  = (uint64_t)inBuffer;
+    di.input.offset  = 0;
+    // NFRU v1 consumes 16 int8 channels and emits 4 logits, in NHWC. Vulkan ignores the
+    // sizes (descriptors there span the buffer), but the D3D12 path builds its views from
+    // them, so they are stated rather than left zero.
+    di.input.size    = (uint64_t)width * height * 16u;
+    di.output.buffer = (uint64_t)outBuffer;
+    di.output.offset = 0;
+    di.output.size   = (uint64_t)width * height * 4u;
+    di.width         = width;
+    di.height        = height;
 
-    VkDataGraphPipelineDispatchInfoARM dispatch_info = {};
-    dispatch_info.sType                              = VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_DISPATCH_INFO_ARM;
-    dispatch_info.flags                              = 0;
-
-    if (effectContext.effectId == ARM_EFFECT_OPTICALFLOW)
+    if (nfruDp4aRecord(dp4a, (uint64_t)vkCommandBuffer, &di) != NFRU_DP4A_OK)
     {
-        VkDataGraphPipelineOpticalFlowDispatchInfoARM dispatch_optical_flow_info = {};
-        dispatch_optical_flow_info.sType                                         = VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_OPTICAL_FLOW_DISPATCH_INFO_ARM;
-        dispatch_optical_flow_info.pNext                                         = nullptr;
-        dispatch_optical_flow_info.flags              = ffxGetVkOpticalFlowExecuteFlags(job->dataGraphJobDescription.opticalFlowExecuteFlags);
-        dispatch_optical_flow_info.meanFlowL1NormHint = job->dataGraphJobDescription.meanFlowL1NormHint;
-        dispatch_info.pNext                           = &dispatch_optical_flow_info;
-
-        VulkanWrapper().vkCmdDispatchDataGraphARM(
-            vkCommandBuffer, reinterpret_cast<VkDataGraphPipelineSessionARM>(job->dataGraphJobDescription.pipeline.session), &dispatch_info);
+        return FFX_ERROR_BACKEND_API_ERROR;
     }
-    else
-    {
-        VulkanWrapper().vkCmdDispatchDataGraphARM(
-            vkCommandBuffer, reinterpret_cast<VkDataGraphPipelineSessionARM>(job->dataGraphJobDescription.pipeline.session), &dispatch_info);
-    }
-
-    // move to another descriptor set for the next compute render job so that we don't overwrite descriptors in-use
-    ++pipelineLayout->descriptorSetIndex;
-    if (pipelineLayout->descriptorSetIndex >= (FFX_MAX_QUEUED_FRAMES * MAX_PIPELINE_USAGE_PER_FRAME))
-        pipelineLayout->descriptorSetIndex = 0;
 
     return FFX_OK;
 }

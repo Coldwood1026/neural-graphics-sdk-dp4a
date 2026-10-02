@@ -82,22 +82,20 @@ compile_all_shaders(
 
 add_shader_output("${ARM_FRAMEINTERPOLATION_PERMUTATION_OUTPUTS}")
 
-# data graph models
-
-# for now, assume files will be in vgf format (but extension might be slightly different )
-if (NOT ARM_FRAMEINTERPOLATION_DATA_GRAPH_EXT)
-    set(ARM_FRAMEINTERPOLATION_DATA_GRAPH_EXT vgf)
-endif()
-
-
-file(GLOB ARM_FRAMEINTERPOLATION_DATA_GRAPHS
-    "data_graphs/nfru/*.${ARM_FRAMEINTERPOLATION_DATA_GRAPH_EXT}")
-
-compile_data_graphs(
-    "${VGF_PARSER_EXECUTABLE}"
-    "${FFX_PASS_DATA_GRAPH_OUTPUT_PATH}/"
-    "${ARM_FRAMEINTERPOLATION_DATA_GRAPHS}" 
-    ARM_FRAMEINTERPOLATION_DATA_GRAPH_OUTPUTS)
-
-# add the header files they generate to the main list of dependencies
-add_shader_output("${ARM_FRAMEINTERPOLATION_DATA_GRAPH_OUTPUTS}")
+# -----------------------------------------------------------------------------
+# Data graphs: NO LONGER GENERATED.
+#
+# This used to call compile_data_graphs() with VGF_PARSER_EXECUTABLE
+# (sdk/tools/binary_store/Model_Parser.exe) to turn `data_graphs/nfru/*.vgf` into
+# nfru_v1_int8.h.
+#
+# Both halves of that are gone. The serializer crashes (0xC0000409) on this
+# repository's own .vgf files, and it is no longer needed anyway: the header it
+# produced was consumed only by CreateDataGraphPipelineVK, which fed the VGF bytes
+# to vkCreateDataGraphPipelinesARM. That ARM execution path is replaced by a
+# portable dp4a compute backend which carries its own baked int8 weights and never
+# reads a VGF.
+#
+# The descriptor is checked in, hand-written from authoritative sources, at
+# `sdk/src/backends/vk/data_graphs/nfru_v1_int8.h`.
+# -----------------------------------------------------------------------------

@@ -165,5 +165,18 @@ if(FFX_BUILD_SAMPLES)
     add_subdirectory(samples)
 endif()
 
-# Build the NG-feature Vulkan layer (VkLayer_arm_NG) alongside the SDK.
-add_subdirectory(layer)
+# -----------------------------------------------------------------------------
+# The Arm Vulkan ML emulation layer (VkLayer_arm_NG) is GONE.
+#
+# It existed for exactly one reason: to inject VkPhysicalDeviceDataGraphFeaturesARM /
+# VkPhysicalDeviceTensorFeaturesARM into the vkCreateDevice pNext chain and to add
+# VK_ARM_data_graph / VK_ARM_tensors to the extension list, so that drivers which do not
+# implement those extensions would accept the SDK anyway (see its own CreateDevice hook
+# in layer/NGLayer.cpp). It is a shim that lies to the driver about extension support.
+#
+# The ML work now runs on a portable dp4a compute backend
+# (sdk/src/backends/vk/nfru_dp4a*), which needs no vendor extension and no layer. With
+# the ARM data-graph execution path removed the layer has nothing left to emulate, so it
+# is deleted rather than disabled: keeping a device-creation interposer that fabricates
+# extension support is a liability, not a feature.
+# -----------------------------------------------------------------------------

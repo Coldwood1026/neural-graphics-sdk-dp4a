@@ -492,6 +492,9 @@ typedef struct FfxFrameGenerationConfig
     bool                           drawDebugPacingLines;     ///< Sets the state of pacing debug lines. Set to true to display debug lines
     bool                           dumpGeneratedFrame;       ///< Sets the state of frame dumping. Set to true to dump interpolated frames to disk
     const char*                    dumpGeneratedFramePath;   ///< The path to dump generated frames to disk. If null, a default path will be used
+    // Restored from AMD FidelityFX SDK 1.1.3 for the imported D3D12 frame-interpolation
+    // swapchain, which caches it to detect a configuration change.
+    FfxRect2D                      interpolationRect;        ///< The sub-rectangle to interpolate.
 } FfxFrameGenerationConfig;
 
 typedef FfxErrorCode (*FfxSwapChainConfigureFrameGenerationFunc)(FfxFrameGenerationConfig const* config);
@@ -576,6 +579,42 @@ typedef FfxErrorCode (*FfxSetMessageCallback)(FfxInterface* backendInterface, Ff
 /// Any functional addition to this interface mandates a version
 /// bump to ensure full functionality across effects and backends.
 ///
+/*
+ * AMD FidelityFX Breadcrumbs Library callbacks.
+ *
+ * Restored together with the D3D12 backend. The Arm fork deleted these along with the
+ * D3D12 backend itself; AMD's FidelityFX SDK 1.1.3 -- this tree's origin -- still has
+ * them, and the imported D3D12 backend both implements and calls them. Without the
+ * members the backend cannot compile at all, because it assigns all four unconditionally.
+ */
+typedef FfxErrorCode (*FfxBreadcrumbsAllocBlockFunc)(
+    FfxInterface* backendInterface,
+    uint64_t blockBytes,
+    FfxBreadcrumbsBlockData* blockData
+    );
+
+typedef void (*FfxBreadcrumbsFreeBlockFunc)(
+    FfxInterface* backendInterface,
+    FfxBreadcrumbsBlockData* blockData
+    );
+
+typedef void (*FfxBreadcrumbsWriteFunc)(
+    FfxInterface* backendInterface,
+    FfxCommandList commandList,
+    uint32_t value,
+    uint64_t gpuLocation,
+    void* gpuBuffer,
+    bool isBegin
+    );
+
+typedef void (*FfxBreadcrumbsPrintDeviceInfoFunc)(
+    FfxInterface* backendInterface,
+    FfxAllocationCallbacks* allocs,
+    bool extendedInfo,
+    char** printBuffer,
+    size_t* printSize
+    );
+
 /// @ingroup FfxInterface
 typedef struct FfxInterface
 {
@@ -607,6 +646,15 @@ typedef struct FfxInterface
     // FidelityFX SDK 1.1 callback handles
     FfxGetPermutationBlobByIndexFunc         fpGetPermutationBlobByIndex;
     FfxSwapChainConfigureFrameGenerationFunc fpSwapChainConfigureFrameGeneration;  ///< A callback function to configure swap chain present callback.
+
+    /*
+     * Breadcrumbs, used by the D3D12 backend (see the typedefs above). Left unassigned by
+     * the Vulkan backend, which does not implement them.
+     */
+    FfxBreadcrumbsAllocBlockFunc       fpBreadcrumbsAllocBlock;       ///< Allocate a Breadcrumbs Library GPU memory block.
+    FfxBreadcrumbsFreeBlockFunc        fpBreadcrumbsFreeBlock;        ///< Free a Breadcrumbs Library GPU memory block.
+    FfxBreadcrumbsWriteFunc            fpBreadcrumbsWrite;            ///< Write a marker into the Breadcrumbs Library.
+    FfxBreadcrumbsPrintDeviceInfoFunc  fpBreadcrumbsPrintDeviceInfo;  ///< Print active GPU info for the Breadcrumbs log.
 
     FfxRegisterConstantBufferAllocatorFunc
         fpRegisterConstantBufferAllocator;  ///< A callback function to register a custom <b>Thread Safe</b> constant buffer allocator.

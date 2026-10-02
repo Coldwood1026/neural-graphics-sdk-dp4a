@@ -81,10 +81,6 @@ static bool LoadVulkanFunctions(const VkDeviceContext& vkDeviceContext, VkFuncti
         success &= loader.getInstanceProc(tb.vkGetPhysicalDeviceProperties2, "vkGetPhysicalDeviceProperties2");
         success &= loader.getInstanceProc(tb.vkGetPhysicalDeviceQueueFamilyProperties, "vkGetPhysicalDeviceQueueFamilyProperties");
         success &= loader.getInstanceProc(tb.vkGetPhysicalDeviceSurfaceSupportKHR, "vkGetPhysicalDeviceSurfaceSupportKHR");
-
-        // Optional ML extensions for Vulkan support
-        loader.getInstanceProc(tb.vkGetPhysicalDeviceQueueFamilyDataGraphEngineOperationPropertiesARM,
-                               "vkGetPhysicalDeviceQueueFamilyDataGraphEngineOperationPropertiesARM");
     }
 
     // vulkan device level functions
@@ -200,20 +196,19 @@ static bool LoadVulkanFunctions(const VkDeviceContext& vkDeviceContext, VkFuncti
         loader.getDeviceProc(tb.vkCmdBeginDebugUtilsLabelEXT, "vkCmdBeginDebugUtilsLabelEXT");
         loader.getDeviceProc(tb.vkCmdEndDebugUtilsLabelEXT, "vkCmdEndDebugUtilsLabelEXT");
 
-        // Optional ML extensions for Vulkan support
+        // VK_ARM_tensors: still used by NSS's coefficient / feedback tensor passes.
         loader.getDeviceProc(tb.vkCreateTensorARM, "vkCreateTensorARM");
         loader.getDeviceProc(tb.vkCreateTensorViewARM, "vkCreateTensorViewARM");
         loader.getDeviceProc(tb.vkGetTensorMemoryRequirementsARM, "vkGetTensorMemoryRequirementsARM");
         loader.getDeviceProc(tb.vkBindTensorMemoryARM, "vkBindTensorMemoryARM");
-        loader.getDeviceProc(tb.vkCreateDataGraphPipelinesARM, "vkCreateDataGraphPipelinesARM");
-        loader.getDeviceProc(tb.vkCreateDataGraphPipelineSessionARM, "vkCreateDataGraphPipelineSessionARM");
-        loader.getDeviceProc(tb.vkCmdDispatchDataGraphARM, "vkCmdDispatchDataGraphARM");
-        loader.getDeviceProc(tb.vkGetDataGraphPipelineSessionBindPointRequirementsARM, "vkGetDataGraphPipelineSessionBindPointRequirementsARM");
-        loader.getDeviceProc(tb.vkGetDataGraphPipelineSessionMemoryRequirementsARM, "vkGetDataGraphPipelineSessionMemoryRequirementsARM");
-        loader.getDeviceProc(tb.vkBindDataGraphPipelineSessionMemoryARM, "vkBindDataGraphPipelineSessionMemoryARM");
-        loader.getDeviceProc(tb.vkDestroyDataGraphPipelineSessionARM, "vkDestroyDataGraphPipelineSessionARM");
         loader.getDeviceProc(tb.vkDestroyTensorARM, "vkDestroyTensorARM");
         loader.getDeviceProc(tb.vkDestroyTensorViewARM, "vkDestroyTensorViewARM");
+
+        // The VK_ARM_data_graph entry points are deliberately NOT resolved any more.
+        // The inference graph runs on the portable dp4a backend, which is an ordinary
+        // compute shader using OpSDot / dot4add_i8packed -- no vendor extension, and
+        // therefore nothing to resolve, nothing to feature-gate, and no emulation layer
+        // needed to pretend the driver supports it.
     }
 
     tb.initialized = success;

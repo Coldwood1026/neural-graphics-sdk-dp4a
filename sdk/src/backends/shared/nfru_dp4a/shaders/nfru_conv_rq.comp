@@ -1,0 +1,253 @@
+// =============================================================================
+// NFRU v1 int8 inference kernel -- dp4a / OpSDot
+// =============================================================================
+// Runs Arm's Neural Frame Rate Upscaling network on any Vulkan GPU with integer
+// dot product support, replacing the VK_ARM_data_graph execution path.
+//
+// Structure and quantisation semantics are taken from the proven NSS desktop
+// backend kernel `conv_rq.comp` (github.com/eastear23333/nss_kernel), adapted to
+// NFRU's 16-layer fully-convolutional graph:
+//
+//   conv1 -> conv2 -> conv3 --+--> conv5 (stride 2, asymmetric pad) --> branches
+//                             +--> skip1_conv ------------------------+
+//   branches: b0 = A ; b1 = B ; b2 = C1(C0(x)) ; b3 = D2(D1(D0(x)))
+//   concat(b0..b3) -> conv5e(1x1,64->16) -> resize x2 -> conv6
+//   concat(that, skip1) -> conv7 -> output_conv_mv   => 4 logits
+//
+// QUANTISATION (verified against Arm's golden output, correlation 0.866; the
+// residual gap is because the checkpoint weights are a different training run
+// from the VGF weights, which correlate 0.872):
+//
+//   activations : int8, NHWC, packed 4 channels per uint32 word
+//   weights     : int8, per-tensor symmetric, zero point 0
+//   accumulate  : acc = sum(q_a * q_w)   int32, exactly dp4a
+//   correction  : the input zero point is folded into the bias as
+//                 bc = bias + (-z_a * sum(w))
+//                 Out-of-range taps are filled with z_a, which makes their
+//                 contribution exactly zero once bc carries that term, so
+//                 "pad with z_a" and "skip the tap" are strictly equivalent.
+//   requantise  : r = (acc * M + (1 << (S-1))) >> S   (TOSA SINGLE_ROUND)
+//                 r = clamp(r + out_zp, -128, 127)
+//   ReLU        : when out_zp == -128 the clamp already makes every value >= 0.
+//                 Do NOT apply an extra max(x, 0); NFRU's output head uses
+//                 out_zp = 44 and is deliberately NOT ReLU'd.
+//
+// One dispatch per layer; all geometry is in the push constant so a single
+// pipeline serves every layer, and the baked weight/bias/multiplier/shift arrays
+// live in storage buffers uploaded once at context creation.
+//
+// SPDX-License-Identifier: MIT
+// =============================================================================
+
+#version 450
+#extension GL_EXT_spirv_intrinsics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+// glslang 15.4 does not know GL_EXT_shader_integer_dot_product, so OpSDot is
+// declared directly. Omitting the Packed Vector Format operand was verified
+// equivalent to specifying it.
+spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6018], id = 4450)
+int spv_sdot(uint v1, uint v2);
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Groups of 4 output channels handled per thread. NFRU's widest layer is
+// conv5e (16 out channels) and its narrowest is output_conv_mv (4), so 4 groups
+// (= 16 channels) covers everything in one pass for the wide layers.
+#define OCG 4u
+
+layout(push_constant) uniform PC {
+    uint in_w;          // input width in pixels (internal, no border)
+    uint in_c4;         // Cin / 4
+    uint out_h;
+    uint out_w;
+    uint out_c4;        // Cout / 4
+    int  pad_top;
+    int  pad_left;
+    uint stride_h;
+    uint stride_w;
+    int  out_zp;
+    uint kh;
+    uint kw;
+    int  has_lut;       // NFRU has no TABLE ops; kept for interface parity
+    uint in_h;          // input height, needed for the out-of-range test
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer ActIn  { uint d[]; } actIn;
+layout(set = 0, binding = 1) readonly  buffer WPk    { uint d[]; } wPk;
+layout(set = 0, binding = 2) readonly  buffer BiasCr { int  d[]; } biasCr;
+layout(set = 0, binding = 3) readonly  buffer Mult   { int  d[]; } mult;
+layout(set = 0, binding = 4) readonly  buffer Shift  { int  d[]; } shiftB;
+layout(set = 0, binding = 5) writeonly buffer ActOut { uint d[]; } actOut;
+
+// -----------------------------------------------------------------------------
+// bias -> rescale -> +out_zp -> clamp, packed into one uint32 of 4 int8.
+// -----------------------------------------------------------------------------
+uint packOut4(int acc0, int acc1, int acc2, int acc3, int oc0)
+{
+    int accs[4] = int[4](acc0, acc1, acc2, acc3);
+    uint packed = 0u;
+    for (int j = 0; j < 4; ++j) {
+        const int oc = oc0 + j;
+        const int v  = accs[j] + biasCr.d[oc];
+        const int sh = shiftB.d[oc];
+        // 64-bit: the accumulator is ~25 bits and multiplier up to 31 bits, so the
+        // product can reach 56 bits. 32-bit would silently overflow.
+        int64_t r = (int64_t(v) * int64_t(mult.d[oc]) + (int64_t(1) << (sh - 1))) >> sh;
+        r += int64_t(pc.out_zp);
+        r  = clamp(r, int64_t(-128), int64_t(127));
+        // No extra ReLU: out_zp == -128 already guarantees r >= 0.
+        packed |= (uint(int(r)) & 0xFFu) << (uint(j) * 8u);
+    }
+    return packed;
+}
+
+void main()
+{
+    const uint ox     = gl_GlobalInvocationID.x;
+    const uint oy     = gl_GlobalInvocationID.y;
+    const uint oc4Base = gl_GlobalInvocationID.z * OCG;
+
+    if (ox >= pc.out_w || oy >= pc.out_h || oc4Base >= pc.out_c4) {
+        return;
+    }
+
+    // Trailing group count: the last z slice may want fewer than OCG groups.
+    uint groups = pc.out_c4 - oc4Base;
+    if (groups > OCG) groups = OCG;
+
+    const uint K4     = pc.kh * pc.kw * pc.in_c4;     // uint32 words per output channel
+    /*
+     * Weight addressing.
+     *
+     * This thread writes output channel oc = (oc4Base + group) * 4 + j, and the weights
+     * for THIS layer are bound starting at binding 1, laid out as
+     * wpk[oc * K4 + wOff + ic4]. The expressions below must therefore sum to oc * K4:
+     *
+     *     wBase0 + group*4*K4 + j*K4  ==  (oc4Base + group)*4*K4 + j*K4
+     *                                 ==  ((oc4Base + group)*4 + j) * K4
+     *                                 ==  oc * K4
+     *
+     * which requires wBase0 = oc4Base * 4 * K4.
+     *
+     * The layer's own offset within the shared weight pool is NOT in here: it is
+     * applied as a descriptor offset when binding, so the kernel stays layer-agnostic and
+     * needs no extra push constant. Omitting that binding offset silently makes every
+     * layer read the FIRST layer's weights, which is invisible for conv1 and wrong for
+     * everything after it.
+     */
+    const uint wBase0 = oc4Base * 4u * K4;
+
+    // 4 groups x 4 channels accumulators.
+    int a00 = 0, a01 = 0, a02 = 0, a03 = 0;
+    int a10 = 0, a11 = 0, a12 = 0, a13 = 0;
+    int a20 = 0, a21 = 0, a22 = 0, a23 = 0;
+    int a30 = 0, a31 = 0, a32 = 0, a33 = 0;
+
+    for (uint ky = 0u; ky < pc.kh; ++ky) {
+        const int iy = int(oy) * int(pc.stride_h) - pc.pad_top + int(ky);
+        for (uint kx = 0u; kx < pc.kw; ++kx) {
+            const int ix = int(ox) * int(pc.stride_w) - pc.pad_left + int(kx);
+
+            // Out-of-range taps use z_a (0x80 per byte). Combined with the bias
+            // correction this contributes exactly zero, matching "skip the tap".
+            const bool tapOut = (iy < 0 || iy >= int(pc.in_h) ||
+                                 ix < 0 || ix >= int(pc.in_w));
+            const uint aBase = uint(iy) * (pc.in_w * pc.in_c4) + uint(ix) * pc.in_c4;
+            const uint wOff  = (ky * pc.kw + kx) * pc.in_c4;
+
+            for (uint ic4 = 0u; ic4 < pc.in_c4; ++ic4) {
+                // One load, reused across OCG groups.
+                const uint a = tapOut ? 0x80808080u : actIn.d[aBase + ic4];
+
+                if (groups > 0u) {
+                    const uint b = wOff + ic4;
+                    a00 += spv_sdot(a, wPk.d[wBase0 + b]);
+                    a01 += spv_sdot(a, wPk.d[wBase0 + b + K4]);
+                    a02 += spv_sdot(a, wPk.d[wBase0 + b + 2u * K4]);
+                    a03 += spv_sdot(a, wPk.d[wBase0 + b + 3u * K4]);
+                }
+                if (groups > 1u) {
+                    const uint b = 4u * K4 + wOff + ic4;
+                    a10 += spv_sdot(a, wPk.d[wBase0 + b]);
+                    a11 += spv_sdot(a, wPk.d[wBase0 + b + K4]);
+                    a12 += spv_sdot(a, wPk.d[wBase0 + b + 2u * K4]);
+                    a13 += spv_sdot(a, wPk.d[wBase0 + b + 3u * K4]);
+                }
+                if (groups > 2u) {
+                    const uint b = 8u * K4 + wOff + ic4;
+                    a20 += spv_sdot(a, wPk.d[wBase0 + b]);
+                    a21 += spv_sdot(a, wPk.d[wBase0 + b + K4]);
+                    a22 += spv_sdot(a, wPk.d[wBase0 + b + 2u * K4]);
+                    a23 += spv_sdot(a, wPk.d[wBase0 + b + 3u * K4]);
+                }
+                if (groups > 3u) {
+                    const uint b = 12u * K4 + wOff + ic4;
+                    a30 += spv_sdot(a, wPk.d[wBase0 + b]);
+                    a31 += spv_sdot(a, wPk.d[wBase0 + b + K4]);
+                    a32 += spv_sdot(a, wPk.d[wBase0 + b + 2u * K4]);
+                    a33 += spv_sdot(a, wPk.d[wBase0 + b + 3u * K4]);
+                }
+            }
+        }
+    }
+
+    // Tight NHWC output, one uint32 per 4 channels.
+    const uint outBase = (oy * pc.out_w + ox) * pc.out_c4;
+
+    /*
+     * Debug: write the RAW accumulator instead of the requantised code. Enabled by
+     * has_lut == 2, which is otherwise unused. One int32 per output channel, so the
+     * buffer must be four times the usual size; that lets a divergence be attributed to
+     * the accumulation or to the requantiser, which the packed output cannot do.
+     */
+    if (pc.has_lut >= 2) {
+        /*
+         * One int32 per output channel, indexed by CHANNEL (not by group), so the layout
+         * is independent of how the groups happen to be split across z slices:
+         *     word[(oy*out_w + ox)*out_c4*4 + oc]
+         * Writing a fixed 16 words per thread, as an earlier version did, is wrong for
+         * any layer with out_c4 > 4 because the higher groups live in a different z
+         * slice and would leave holes.
+         *
+         * The four group accumulators are gathered into ONE array indexed by channel.
+         * Keeping them in four separate arrays that were assigned conditionally made the
+         * debug path depend on the compiler proving which of them was live, which is
+         * exactly the kind of thing that turns a measurement into a guess.
+         */
+        int accsAll[16] = int[16](a00, a01, a02, a03,
+                                  a10, a11, a12, a13,
+                                  a20, a21, a22, a23,
+                                  a30, a31, a32, a33);
+        const uint pixelBase = (oy * pc.out_w + ox) * pc.out_c4 * 4u;
+        for (uint g = 0u; g < groups; ++g) {
+            const uint oc = (oc4Base + g) * 4u;
+            for (uint j = 0u; j < 4u; ++j) {
+                /*
+                 * has_lut == 3 writes a THREAD MARKER instead of the accumulator.
+                 *
+                 * A missing/zero word is ambiguous on its own: it can mean the thread
+                 * never ran, or that it ran and something upstream lost the store. A
+                 * marker that can only have come from that exact thread removes the
+                 * ambiguity -- a zero word proves the thread did not write, a correct
+                 * marker proves it did and the data was lost later.
+                 */
+                uint v;
+                if (pc.has_lut == 3) {
+                    v = 0xA5A50000u | ((uint(oy) & 0xFFu) << 16) |
+                        ((uint(ox) & 0xFFu) << 8) | (uint(oc + j) & 0xFFu);
+                } else {
+                    v = uint(accsAll[g * 4u + j]);
+                }
+                actOut.d[pixelBase + oc + j] = v;
+            }
+        }
+        return;
+    }
+
+    if (groups > 0u) actOut.d[outBase + oc4Base + 0u] = packOut4(a00, a01, a02, a03, int(oc4Base + 0u) * 4);
+    if (groups > 1u) actOut.d[outBase + oc4Base + 1u] = packOut4(a10, a11, a12, a13, int(oc4Base + 1u) * 4);
+    if (groups > 2u) actOut.d[outBase + oc4Base + 2u] = packOut4(a20, a21, a22, a23, int(oc4Base + 2u) * 4);
+    if (groups > 3u) actOut.d[outBase + oc4Base + 3u] = packOut4(a30, a31, a32, a33, int(oc4Base + 3u) * 4);
+}

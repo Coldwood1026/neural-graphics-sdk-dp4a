@@ -50,7 +50,14 @@ set(Vulkan_INCLUDE_DIRS "${Vulkan_INCLUDE_DIR}")
 message(STATUS "Vulkan_INCLUDE_DIR=${Vulkan_INCLUDE_DIR}")
 message(STATUS "Vulkan_INCLUDE_DIRS=${Vulkan_INCLUDE_DIRS}")
 
-find_package(Vulkan REQUIRED)
+# Headers only: this backend is compiled with VK_NO_PROTOTYPES and resolves every entry
+# point at runtime through the host's vkGetInstanceProcAddr, so it links no Vulkan import
+# library. find_package(Vulkan REQUIRED) treated Vulkan_LIBRARY as required and made the
+# SDK unconfigurable without a LunarG SDK installation, while using nothing from it.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../cmake/ffx_vulkan_headers.cmake")
+ffx_require_vulkan_headers()
+set(Vulkan_VERSION "${VULKAN_HEADERS_VERSION}")
+message(STATUS "Vulkan headers: ${VULKAN_HEADERS_VERSION} at ${Vulkan_INCLUDE_DIR}")
 CheckVulkanSDKVersion()
 
 set(PUBLIC_SHADERS "")
@@ -66,6 +73,37 @@ file(GLOB PRIVATE_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
+
+# -----------------------------------------------------------------------------
+# Portable dp4a inference backend.
+#
+# This is the whole replacement for the Arm data-graph execution path: an int8
+# dp4a compute graph that runs on ordinary Vulkan and D3D12. It lives under
+# shared/ because ONE implementation serves both APIs -- nfru_plan.cpp decides what
+# to record, and nfru_vk.cpp / nfru_dx12.cpp only translate that into API calls. That
+# split is what makes "Vulkan and DX12 produce bit-identical output" a property of the
+# code rather than a promise about two files kept in step by hand.
+#
+# Both device translation units are compiled into both backends. That is deliberate:
+# it keeps this module byte-identical to the standalone nfru_dp4a.dll that was
+# validated bit-exact against the reference on real hardware, and the cost is only a
+# link-time dependency on d3d12.lib. Vulkan is loaded at RUNTIME through
+# vkGetInstanceProcAddr, so the Vulkan backend still has no import-library dependency
+# on vulkan-1.lib, and the DX12 backend still has none on it either.
+# -----------------------------------------------------------------------------
+file(GLOB NFRU_DP4A_SOURCE
+    "${FFX_SRC_BACKENDS_PATH}/shared/nfru_dp4a/*.h"
+    "${FFX_SRC_BACKENDS_PATH}/shared/nfru_dp4a/*.cpp"
+)
+list(APPEND PRIVATE_SOURCE ${NFRU_DP4A_SOURCE})
+
+# NSS's dp4a backend. Independent of the NFRU module above: different network, different
+# kernels, its own baked weights and its own toolchain.
+file(GLOB NSS_DP4A_SOURCE
+    "${FFX_SRC_BACKENDS_PATH}/shared/nss_dp4a/src/*.h"
+    "${FFX_SRC_BACKENDS_PATH}/shared/nss_dp4a/src/*.cpp"
+)
+list(APPEND PRIVATE_SOURCE ${NSS_DP4A_SOURCE})
 
 if (FFX_FI OR FFX_ALL)
 	#if(WIN32)
@@ -195,6 +233,50 @@ target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PUBLIC ${FFX_INCL
 target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PUBLIC ${FFX_LIB_PATH})
 target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PUBLIC ${FFX_PASS_SHADER_OUTPUT_PATH})
 target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PUBLIC ${FFX_PASS_DATA_GRAPH_OUTPUT_PATH})
+# Checked-in data-graph model descriptors. These used to be generated into
+# FFX_PASS_DATA_GRAPH_OUTPUT_PATH by Model_Parser; they are hand-written now (see
+# the header comments) because the only thing that consumed them was the ARM
+# data-graph pipeline creation, and Model_Parser crashes on the repo's own .vgf.
+target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/data_graphs")
+
+# The dp4a module: headers, and NFRU_DP4A_INTERNAL so its API is neither imported nor
+# exported (see the linkage block in nfru_dp4a.h -- without it the module's own
+# definitions would be declared dllimport and the link would fail).
+target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE
+    "${FFX_SRC_BACKENDS_PATH}/shared/nfru_dp4a")
+target_compile_definitions(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE NFRU_DP4A_INTERNAL)
+
+# The NSS module: include/ holds nss_dp4a.h, generated/ its baked model headers, src/ its
+# own headers. NSS_DP4A_INTERNAL keeps its C API out of the host's export table, exactly
+# as NFRU_DP4A_INTERNAL does for NFRU.
+target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE
+    "${FFX_SRC_BACKENDS_PATH}/shared/nss_dp4a/include"
+    "${FFX_SRC_BACKENDS_PATH}/shared/nss_dp4a/generated"
+    "${FFX_SRC_BACKENDS_PATH}/shared/nss_dp4a/src"
+)
+target_compile_definitions(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE NSS_DP4A_INTERNAL)
+
+# The NSS module needs two things the SDK target does not set, and both are hard errors
+# without them:
+#
+#   /utf-8      Its comments and log strings are UTF-8 Chinese. Without this MSVC decodes
+#               them as the local ANSI code page, and a multi-byte sequence whose trailing
+#               byte is 0x5C ("\") swallows the closing quote of the string literal. That
+#               surfaces as C2001 "newline in constant" at eleven sites, none of them
+#               anywhere near the actual problem.
+#
+#   /std:c++20  It builds its layer tables with designated initialisers (`.field = value`).
+#               The SDK defaults to C++17, where those are rejected under this target's
+#               settings (C7555), which then cascades into C2027 "undefined type
+#               nss_baked::LayerDesc" at forty more sites.
+#
+# Scoped to the module's own translation units so the SDK's existing sources keep being
+# compiled exactly as before.
+set_source_files_properties(${NSS_DP4A_SOURCE} PROPERTIES COMPILE_OPTIONS "/utf-8;/std:c++20")
+
+# d3d12/dxgi: the dp4a module carries its DX12 device translation unit too (see above).
+target_link_libraries(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE dxgi d3d12)
 target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE ${FFX_COMPONENTS_PATH})
 target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE ${FFX_SHARED_PATH})
 target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE "${FFX_SRC_BACKENDS_PATH}/shared")

@@ -116,12 +116,30 @@ if (FFX_GRAPHICS_API STREQUAL vk)
 	file(GLOB public_ffx_api_backend_vk
 		${CMAKE_CURRENT_SOURCE_DIR}/include/ffx_api/vk/*.h
 		${CMAKE_CURRENT_SOURCE_DIR}/include/ffx_api/vk/*.hpp)
+elseif (FFX_GRAPHICS_API STREQUAL dx12)
+	# The D3D12 counterpart of the block above. ffx_provider.cpp switches on these two
+	# macros to pick which swapchain provider it instantiates (and #errors if neither is
+	# defined), so FFX_BACKEND_DX12 has to be set here or the provider refuses to compile.
+	message(STATUS "Setting FFX_BACKEND_DX12")
+	add_compile_definitions(FFXDLL_VERSION_API=DX12)
+	set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS FFX_BACKEND_DX12)
+
+	if (FFX_FI OR FFX_ALL)
+		file(GLOB private_ffx_api_backend_dx12
+			${CMAKE_CURRENT_SOURCE_DIR}/src/dx12/*.h
+			${CMAKE_CURRENT_SOURCE_DIR}/src/dx12/*.cpp)
+	endif()
+
+	file(GLOB public_ffx_api_backend_dx12
+		${CMAKE_CURRENT_SOURCE_DIR}/include/ffx_api/dx12/*.h
+		${CMAKE_CURRENT_SOURCE_DIR}/include/ffx_api/dx12/*.hpp)
 endif()
 
 # Use operating system and architecture as the postfix for the library name
 # We might consider add graphics api when we start supporting other than vulkan(for example dx12)
 if(FFX_BUILD_AS_DLL)
-	add_library(${SDK_LIB_NAME} SHARED ${private_ffx_api} ${private_ffx_api_backend_vk} ${public_ffx_api} ${public_ffx_api_backend_vk})
+	add_library(${SDK_LIB_NAME} SHARED ${private_ffx_api} ${private_ffx_api_backend_vk} ${public_ffx_api} ${public_ffx_api_backend_vk}
+		${private_ffx_api_backend_dx12} ${public_ffx_api_backend_dx12})
 	# strip symbols for release build to reduce the library size.
 	target_link_options(
 		${SDK_LIB_NAME}
@@ -142,7 +160,8 @@ if(FFX_BUILD_AS_DLL)
 		)
 	endif()
 else()
-	add_library(${SDK_LIB_NAME} STATIC ${private_ffx_api} ${private_ffx_api_backend_vk} ${public_ffx_api} ${public_ffx_api_backend_vk})
+	add_library(${SDK_LIB_NAME} STATIC ${private_ffx_api} ${private_ffx_api_backend_vk} ${public_ffx_api} ${public_ffx_api_backend_vk}
+		${private_ffx_api_backend_dx12} ${public_ffx_api_backend_dx12})
 endif()
 
 source_group("private_source" FILES ${private_ffx_api})
@@ -187,8 +206,25 @@ if(FFX_OF OR FFX_ALL)
 endif()
 
 if (FFX_GRAPHICS_API STREQUAL vk)
-	find_package(Vulkan REQUIRED)
+	# Headers only. The Vulkan backend resolves every entry point at runtime through the
+	# host's vkGetInstanceProcAddr and is compiled with VK_NO_PROTOTYPES, so nothing here
+	# links vulkan-1.lib. Calling find_package(Vulkan REQUIRED) demanded that import
+	# library anyway and made the whole SDK unconfigurable on a machine without the LunarG
+	# SDK installed -- even though the headers are vendored under sdk/include/vulkan-headers
+	# and are the only thing actually used.
+	include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/ffx_vulkan_headers.cmake")
+	ffx_require_vulkan_headers()
+	if (NOT TARGET Vulkan::Headers)
+		add_library(Vulkan::Headers INTERFACE IMPORTED)
+		set_target_properties(Vulkan::Headers PROPERTIES
+			INTERFACE_INCLUDE_DIRECTORIES "${VULKAN_HEADERS_INCLUDE_DIR}")
+	endif()
 	target_link_libraries(${SDK_LIB_NAME} PRIVATE Vulkan::Headers ffx_backend_vk_${FFX_PLATFORM_NAME})
+elseif (FFX_GRAPHICS_API STREQUAL dx12)
+	# The D3D12 backend needs no SDK installation at all: d3d12.lib and dxgi.lib ship in
+	# the Windows SDK, and its shaders arrive as premade DXIL embedded in the dp4a module
+	# rather than being compiled from source. See sdk/src/backends/dx12/CMakeLists.txt.
+	target_link_libraries(${SDK_LIB_NAME} PRIVATE ffx_backend_dx12_${FFX_PLATFORM_NAME})
 else()
-	message(FATAL_ERROR "For now we only support vulkan backend.")
+	message(FATAL_ERROR "Unsupported graphics API '${FFX_GRAPHICS_API}'. Supported: vk, dx12.")
 endif()

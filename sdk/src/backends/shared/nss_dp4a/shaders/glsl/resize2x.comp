@@ -1,0 +1,52 @@
+// 2× 最近邻上采样（TOSA RESIZE，scale=[4,2,4,2]）。
+// 映射：out(oy,ox) = in(oy/2, ox/2)（见下方 offset 说明）。输入输出都带 1 像素边框。
+//
+// ★ 向量化（2026-10-01，性能）：原来每个线程只搬 1 个 word（4 字节），
+//   一个 8x8 workgroup 要 4~8 个 z 切片才覆盖完通道。改成**每线程搬 16 字节
+//   （uvec4 = 4 个通道组）**：线程数降到 1/4，索引/判定等固定开销也降到 1/4，
+//   而访存仍然是完全合并的（相邻 x 的线程访问相邻的 uvec4）。
+//   前提：in_c4 是 4 的倍数（本模型的通道数是 16/32/48/64 ⇒ c4 = 4/8/12/16 ✓）；
+//   不满足时走「尾组」分支（读-改-写，不会覆盖相邻数据）。
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(push_constant) uniform PC {
+    uint in_h;      // 输入内部高（用于钳位）
+    uint in_w;      // 输入内部宽
+    uint in_c4;
+    uint out_h;
+    uint out_w;
+} pc;
+layout(set = 0, binding = 0) readonly  buffer Src { uvec4 d[]; } src;
+/* 不能加 writeonly：尾组分支要做读-改-写以免覆盖相邻数据 */
+layout(set = 0, binding = 6) buffer Dst { uvec4 d[]; } dst;
+
+void main() {
+    uint ox = gl_GlobalInvocationID.x;
+    uint oy = gl_GlobalInvocationID.y;
+    uint c4 = gl_GlobalInvocationID.z * 4u;
+    if (ox >= pc.out_w || oy >= pc.out_h || c4 >= pc.in_c4) return;
+
+    // TOSA RESIZE 的 offset 操作数是 -1（实测！），故：
+    //   y = oy*2 - 1 → iy = floor(y/4)，再按 2*ry>=4 决定是否 +1
+    // 化简后即 iy = oy/2（比 (oy+1)/2 少偏移半格，只在边界处不同）。
+    uint sy = min(oy / 2u, pc.in_h - 1u);
+    uint sx = min(ox / 2u, pc.in_w - 1u);
+    // 所有项都是 4 的倍数（in_c4 % 4 == 0、c4 % 4 == 0）⇒ 可以按 uvec4 寻址
+    uint sIdx = (sy + 1u) * (pc.in_w + 2u) * pc.in_c4 + (sx + 1u) * pc.in_c4 + c4;
+    uint dIdx = (oy + 1u) * (pc.out_w + 2u) * pc.in_c4 + (ox + 1u) * pc.in_c4 + c4;
+    uint sq = sIdx >> 2u;
+    uint dq = dIdx >> 2u;
+
+    if (c4 + 4u <= pc.in_c4) {
+        dst.d[dq] = src.d[sq];
+    } else {
+        /* 尾组：源端多读的字落在缓冲尾部余量内（kTensorTailSlack）；
+         * 目的端用读-改-写，避免覆盖相邻像素/通道。 */
+        uvec4 s = src.d[sq];
+        uvec4 o = dst.d[dq];
+        for (uint j = 0u; j < 4u; ++j) {
+            if (c4 + j < pc.in_c4) o[j] = s[j];
+        }
+        dst.d[dq] = o;
+    }
+}

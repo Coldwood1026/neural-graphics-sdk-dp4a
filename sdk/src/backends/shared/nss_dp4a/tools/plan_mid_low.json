@@ -1,0 +1,614 @@
+{
+  "input_shape": [
+    1,
+    544,
+    960,
+    12
+  ],
+  "total_macs": 5685126784,
+  "weight_bytes": 143888,
+  "layers": [
+    {
+      "op": 0,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        272,
+        480,
+        32
+      ],
+      "input_shape": [
+        1,
+        544,
+        960,
+        12
+      ],
+      "K": 108,
+      "k_div4": true,
+      "dp4a_per_out": 27,
+      "oc": 32,
+      "macs": 450349440,
+      "weight_bytes": 3456,
+      "correction_bytes": 128,
+      "weight_dp4a_u32": 864,
+      "act_bytes": 4177920
+    },
+    {
+      "op": 1,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        272,
+        480,
+        32
+      ],
+      "macs": 0,
+      "act_bytes": 4177920
+    },
+    {
+      "op": 2,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        272,
+        480,
+        32
+      ],
+      "input_shape": [
+        1,
+        272,
+        480,
+        32
+      ],
+      "K": 288,
+      "k_div4": true,
+      "dp4a_per_out": 72,
+      "oc": 32,
+      "macs": 1198624768,
+      "weight_bytes": 9216,
+      "correction_bytes": 128,
+      "weight_dp4a_u32": 2304,
+      "act_bytes": 4177920
+    },
+    {
+      "op": 3,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        272,
+        480,
+        32
+      ],
+      "macs": 0,
+      "act_bytes": 4177920
+    },
+    {
+      "op": 4,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "input_shape": [
+        1,
+        272,
+        480,
+        32
+      ],
+      "K": 288,
+      "k_div4": true,
+      "dp4a_per_out": 72,
+      "oc": 32,
+      "macs": 299656192,
+      "weight_bytes": 9216,
+      "correction_bytes": 128,
+      "weight_dp4a_u32": 2304,
+      "act_bytes": 1044480
+    },
+    {
+      "op": 5,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "macs": 0,
+      "act_bytes": 1044480
+    },
+    {
+      "op": 6,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "input_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "K": 288,
+      "k_div4": true,
+      "dp4a_per_out": 72,
+      "oc": 32,
+      "macs": 298504192,
+      "weight_bytes": 9216,
+      "correction_bytes": 128,
+      "weight_dp4a_u32": 2304,
+      "act_bytes": 1044480
+    },
+    {
+      "op": 7,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "macs": 0,
+      "act_bytes": 1044480
+    },
+    {
+      "op": 8,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        68,
+        120,
+        64
+      ],
+      "input_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "K": 288,
+      "k_div4": true,
+      "dp4a_per_out": 72,
+      "oc": 64,
+      "macs": 149252096,
+      "weight_bytes": 18432,
+      "correction_bytes": 256,
+      "weight_dp4a_u32": 4608,
+      "act_bytes": 522240
+    },
+    {
+      "op": 9,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        68,
+        120,
+        64
+      ],
+      "macs": 0,
+      "act_bytes": 522240
+    },
+    {
+      "op": 10,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        68,
+        120,
+        64
+      ],
+      "input_shape": [
+        1,
+        68,
+        120,
+        64
+      ],
+      "K": 576,
+      "k_div4": true,
+      "dp4a_per_out": 144,
+      "oc": 64,
+      "macs": 296206336,
+      "weight_bytes": 36864,
+      "correction_bytes": 256,
+      "weight_dp4a_u32": 9216,
+      "act_bytes": 522240
+    },
+    {
+      "op": 11,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        68,
+        120,
+        64
+      ],
+      "macs": 0,
+      "act_bytes": 522240
+    },
+    {
+      "op": 12,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        68,
+        120,
+        32
+      ],
+      "input_shape": [
+        1,
+        68,
+        120,
+        64
+      ],
+      "K": 576,
+      "k_div4": true,
+      "dp4a_per_out": 144,
+      "oc": 32,
+      "macs": 148103168,
+      "weight_bytes": 18432,
+      "correction_bytes": 128,
+      "weight_dp4a_u32": 4608,
+      "act_bytes": 261120
+    },
+    {
+      "op": 13,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        68,
+        120,
+        32
+      ],
+      "macs": 0,
+      "act_bytes": 261120
+    },
+    {
+      "op": 14,
+      "kind": "RESIZE",
+      "out_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "macs": 0,
+      "act_bytes": 1044480
+    },
+    {
+      "op": 15,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        136,
+        240,
+        16
+      ],
+      "input_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "K": 288,
+      "k_div4": true,
+      "dp4a_per_out": 72,
+      "oc": 16,
+      "macs": 149252096,
+      "weight_bytes": 4608,
+      "correction_bytes": 64,
+      "weight_dp4a_u32": 1152,
+      "act_bytes": 522240
+    },
+    {
+      "op": 16,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        136,
+        240,
+        16
+      ],
+      "macs": 0,
+      "act_bytes": 522240
+    },
+    {
+      "op": 17,
+      "kind": "CONCAT",
+      "out_shape": [
+        1,
+        136,
+        240,
+        48
+      ],
+      "macs": 0,
+      "act_bytes": 1566720
+    },
+    {
+      "op": 18,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "input_shape": [
+        1,
+        136,
+        240,
+        48
+      ],
+      "K": 432,
+      "k_div4": true,
+      "dp4a_per_out": 108,
+      "oc": 32,
+      "macs": 447756288,
+      "weight_bytes": 13824,
+      "correction_bytes": 128,
+      "weight_dp4a_u32": 3456,
+      "act_bytes": 1044480
+    },
+    {
+      "op": 19,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "macs": 0,
+      "act_bytes": 1044480
+    },
+    {
+      "op": 20,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        136,
+        240,
+        16
+      ],
+      "input_shape": [
+        1,
+        136,
+        240,
+        32
+      ],
+      "K": 288,
+      "k_div4": true,
+      "dp4a_per_out": 72,
+      "oc": 16,
+      "macs": 149252096,
+      "weight_bytes": 4608,
+      "correction_bytes": 64,
+      "weight_dp4a_u32": 1152,
+      "act_bytes": 522240
+    },
+    {
+      "op": 21,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        136,
+        240,
+        16
+      ],
+      "macs": 0,
+      "act_bytes": 522240
+    },
+    {
+      "op": 22,
+      "kind": "RESIZE",
+      "out_shape": [
+        1,
+        272,
+        480,
+        32
+      ],
+      "macs": 0,
+      "act_bytes": 4177920
+    },
+    {
+      "op": 23,
+      "kind": "TABLE",
+      "out_shape": [
+        1,
+        136,
+        240,
+        16
+      ],
+      "macs": 0,
+      "act_bytes": 522240
+    },
+    {
+      "op": 24,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        272,
+        480,
+        16
+      ],
+      "input_shape": [
+        1,
+        272,
+        480,
+        32
+      ],
+      "K": 288,
+      "k_div4": true,
+      "dp4a_per_out": 72,
+      "oc": 16,
+      "macs": 599312384,
+      "weight_bytes": 4608,
+      "correction_bytes": 64,
+      "weight_dp4a_u32": 1152,
+      "act_bytes": 2088960
+    },
+    {
+      "op": 25,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        272,
+        480,
+        16
+      ],
+      "macs": 0,
+      "act_bytes": 2088960
+    },
+    {
+      "op": 26,
+      "kind": "CONCAT",
+      "out_shape": [
+        1,
+        272,
+        480,
+        48
+      ],
+      "macs": 0,
+      "act_bytes": 6266880
+    },
+    {
+      "op": 27,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        272,
+        480,
+        16
+      ],
+      "input_shape": [
+        1,
+        272,
+        480,
+        48
+      ],
+      "K": 432,
+      "k_div4": true,
+      "dp4a_per_out": 108,
+      "oc": 16,
+      "macs": 898968576,
+      "weight_bytes": 6912,
+      "correction_bytes": 64,
+      "weight_dp4a_u32": 1728,
+      "act_bytes": 2088960
+    },
+    {
+      "op": 28,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        272,
+        480,
+        16
+      ],
+      "macs": 0,
+      "act_bytes": 2088960
+    },
+    {
+      "op": 29,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        272,
+        480,
+        16
+      ],
+      "input_shape": [
+        1,
+        272,
+        480,
+        16
+      ],
+      "K": 144,
+      "k_div4": true,
+      "dp4a_per_out": 36,
+      "oc": 16,
+      "macs": 299656192,
+      "weight_bytes": 2304,
+      "correction_bytes": 64,
+      "weight_dp4a_u32": 576,
+      "act_bytes": 2088960
+    },
+    {
+      "op": 30,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        272,
+        480,
+        16
+      ],
+      "macs": 0,
+      "act_bytes": 2088960
+    },
+    {
+      "op": 31,
+      "kind": "RESIZE",
+      "out_shape": [
+        1,
+        544,
+        960,
+        16
+      ],
+      "macs": 0,
+      "act_bytes": 8355840
+    },
+    {
+      "op": 32,
+      "kind": "CONV2D",
+      "out_shape": [
+        1,
+        544,
+        960,
+        4
+      ],
+      "input_shape": [
+        1,
+        544,
+        960,
+        16
+      ],
+      "K": 144,
+      "k_div4": true,
+      "dp4a_per_out": 36,
+      "oc": 4,
+      "macs": 300232960,
+      "weight_bytes": 576,
+      "correction_bytes": 16,
+      "weight_dp4a_u32": 144,
+      "act_bytes": 2088960
+    },
+    {
+      "op": 33,
+      "kind": "RESCALE",
+      "out_shape": [
+        1,
+        544,
+        960,
+        4
+      ],
+      "macs": 0,
+      "act_bytes": 2088960
+    },
+    {
+      "op": 34,
+      "kind": "TABLE",
+      "out_shape": [
+        1,
+        544,
+        960,
+        4
+      ],
+      "macs": 0,
+      "act_bytes": 2088960
+    }
+  ]
+}

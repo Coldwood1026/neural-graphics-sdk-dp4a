@@ -1,0 +1,920 @@
+{
+  "file": "E:/.luna/nss-model/nss_v1_0_1_mid_low_int8.vgf",
+  "size": 158800,
+  "sections": {
+    "modules": {
+      "offset": 128,
+      "size": 8760
+    },
+    "model_sequence": {
+      "offset": 8888,
+      "size": 568
+    },
+    "resources": {
+      "offset": 9456,
+      "size": 2704
+    },
+    "constants": {
+      "offset": 12160,
+      "size": 146640
+    }
+  },
+  "modules": [
+    {
+      "type": "GRAPH",
+      "name": "graph_partition_0",
+      "entry_point": "graph_partition_0",
+      "code_kind": "SPIRV",
+      "spirv_word_count": 2160,
+      "spirv_magic": "0x7230203",
+      "spirv_version": "1.5",
+      "spirv_id_bound": 354
+    }
+  ],
+  "model_sequence": {
+    "segments": [
+      {
+        "type": "GRAPH",
+        "name": "graph_segment_0",
+        "module_index": 0,
+        "set_infos": [
+          {
+            "set_index": 4294967295,
+            "bindings": [
+              {
+                "binding": 0,
+                "mrt_index": 40
+              },
+              {
+                "binding": 1,
+                "mrt_index": 41
+              },
+              {
+                "binding": 2,
+                "mrt_index": 42
+              }
+            ]
+          }
+        ],
+        "inputs": [
+          {
+            "binding": 0,
+            "mrt_index": 40
+          }
+        ],
+        "outputs": [
+          {
+            "binding": 1,
+            "mrt_index": 41
+          },
+          {
+            "binding": 2,
+            "mrt_index": 42
+          }
+        ],
+        "constants": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39
+        ],
+        "dispatch_shape": [
+          0,
+          0,
+          0
+        ],
+        "push_constant_ranges": [],
+        "constant_bindings": []
+      }
+    ],
+    "inputs": [
+      {
+        "binding": 0,
+        "mrt_index": 40
+      }
+    ],
+    "outputs": [
+      {
+        "binding": 1,
+        "mrt_index": 41
+      },
+      {
+        "binding": 2,
+        "mrt_index": 42
+      }
+    ],
+    "input_names": [
+      "tosa_deserialized_input_0:0"
+    ],
+    "output_names": [
+      "tosa_deserialized_output_0:0",
+      "tosa_deserialized_output_1:0"
+    ]
+  },
+  "resources": [
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        256
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        256
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        12
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        64,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        48
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        48
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        16
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        4,
+        3,
+        3,
+        16
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "INPUT",
+      "vk_descriptor_type": 1000460000,
+      "vk_format": "R8_SINT",
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        12
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "OUTPUT",
+      "vk_descriptor_type": 1000460000,
+      "vk_format": "R8_SINT",
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        16
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "OUTPUT",
+      "vk_descriptor_type": 1000460000,
+      "vk_format": "R8_SINT",
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        4
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    }
+  ],
+  "constants": {
+    "group_name": "CONST00",
+    "count": 40,
+    "data_base_rel": 976,
+    "entries": [
+      {
+        "id": 0,
+        "alias_group_id": 4294967295,
+        "size": 32,
+        "offset": 0,
+        "abs_offset": 13136
+      },
+      {
+        "id": 1,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 32,
+        "abs_offset": 13168
+      },
+      {
+        "id": 2,
+        "alias_group_id": 4294967295,
+        "size": 32,
+        "offset": 160,
+        "abs_offset": 13296
+      },
+      {
+        "id": 3,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 192,
+        "abs_offset": 13328
+      },
+      {
+        "id": 4,
+        "alias_group_id": 4294967295,
+        "size": 64,
+        "offset": 320,
+        "abs_offset": 13456
+      },
+      {
+        "id": 5,
+        "alias_group_id": 4294967295,
+        "size": 256,
+        "offset": 384,
+        "abs_offset": 13520
+      },
+      {
+        "id": 6,
+        "alias_group_id": 4294967295,
+        "size": 64,
+        "offset": 640,
+        "abs_offset": 13776
+      },
+      {
+        "id": 7,
+        "alias_group_id": 4294967295,
+        "size": 256,
+        "offset": 704,
+        "abs_offset": 13840
+      },
+      {
+        "id": 8,
+        "alias_group_id": 4294967295,
+        "size": 32,
+        "offset": 960,
+        "abs_offset": 14096
+      },
+      {
+        "id": 9,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 992,
+        "abs_offset": 14128
+      },
+      {
+        "id": 10,
+        "alias_group_id": 4294967295,
+        "size": 32,
+        "offset": 1120,
+        "abs_offset": 14256
+      },
+      {
+        "id": 11,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 1152,
+        "abs_offset": 14288
+      },
+      {
+        "id": 12,
+        "alias_group_id": 4294967295,
+        "size": 32,
+        "offset": 1280,
+        "abs_offset": 14416
+      },
+      {
+        "id": 13,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 1312,
+        "abs_offset": 14448
+      },
+      {
+        "id": 14,
+        "alias_group_id": 4294967295,
+        "size": 32,
+        "offset": 1440,
+        "abs_offset": 14576
+      },
+      {
+        "id": 15,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 1472,
+        "abs_offset": 14608
+      },
+      {
+        "id": 16,
+        "alias_group_id": 4294967295,
+        "size": 256,
+        "offset": 1600,
+        "abs_offset": 14736
+      },
+      {
+        "id": 17,
+        "alias_group_id": 4294967295,
+        "size": 256,
+        "offset": 1856,
+        "abs_offset": 14992
+      },
+      {
+        "id": 18,
+        "alias_group_id": 4294967295,
+        "size": 3456,
+        "offset": 2112,
+        "abs_offset": 15248
+      },
+      {
+        "id": 19,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 5568,
+        "abs_offset": 18704
+      },
+      {
+        "id": 20,
+        "alias_group_id": 4294967295,
+        "size": 9216,
+        "offset": 5696,
+        "abs_offset": 18832
+      },
+      {
+        "id": 21,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 14912,
+        "abs_offset": 28048
+      },
+      {
+        "id": 22,
+        "alias_group_id": 4294967295,
+        "size": 9216,
+        "offset": 15040,
+        "abs_offset": 28176
+      },
+      {
+        "id": 23,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 24256,
+        "abs_offset": 37392
+      },
+      {
+        "id": 24,
+        "alias_group_id": 4294967295,
+        "size": 9216,
+        "offset": 24384,
+        "abs_offset": 37520
+      },
+      {
+        "id": 25,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 33600,
+        "abs_offset": 46736
+      },
+      {
+        "id": 26,
+        "alias_group_id": 4294967295,
+        "size": 18432,
+        "offset": 33728,
+        "abs_offset": 46864
+      },
+      {
+        "id": 27,
+        "alias_group_id": 4294967295,
+        "size": 256,
+        "offset": 52160,
+        "abs_offset": 65296
+      },
+      {
+        "id": 28,
+        "alias_group_id": 4294967295,
+        "size": 36864,
+        "offset": 52416,
+        "abs_offset": 65552
+      },
+      {
+        "id": 29,
+        "alias_group_id": 4294967295,
+        "size": 256,
+        "offset": 89280,
+        "abs_offset": 102416
+      },
+      {
+        "id": 30,
+        "alias_group_id": 4294967295,
+        "size": 18432,
+        "offset": 89536,
+        "abs_offset": 102672
+      },
+      {
+        "id": 31,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 107968,
+        "abs_offset": 121104
+      },
+      {
+        "id": 32,
+        "alias_group_id": 4294967295,
+        "size": 4608,
+        "offset": 108096,
+        "abs_offset": 121232
+      },
+      {
+        "id": 33,
+        "alias_group_id": 4294967295,
+        "size": 13824,
+        "offset": 112704,
+        "abs_offset": 125840
+      },
+      {
+        "id": 34,
+        "alias_group_id": 4294967295,
+        "size": 128,
+        "offset": 126528,
+        "abs_offset": 139664
+      },
+      {
+        "id": 35,
+        "alias_group_id": 4294967295,
+        "size": 4608,
+        "offset": 126656,
+        "abs_offset": 139792
+      },
+      {
+        "id": 36,
+        "alias_group_id": 4294967295,
+        "size": 4608,
+        "offset": 131264,
+        "abs_offset": 144400
+      },
+      {
+        "id": 37,
+        "alias_group_id": 4294967295,
+        "size": 6912,
+        "offset": 135872,
+        "abs_offset": 149008
+      },
+      {
+        "id": 38,
+        "alias_group_id": 4294967295,
+        "size": 2304,
+        "offset": 142784,
+        "abs_offset": 155920
+      },
+      {
+        "id": 39,
+        "alias_group_id": 4294967295,
+        "size": 576,
+        "offset": 145088,
+        "abs_offset": 158224
+      }
+    ]
+  }
+}

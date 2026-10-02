@@ -1,0 +1,2357 @@
+{
+  "vgf": "nss_v1_0_1_high_int8.vgf",
+  "graph_name": "graph_partition_0",
+  "unresolved_tensor_ids": [],
+  "modules": [
+    {
+      "name": "graph_partition_0",
+      "entry_point": "graph_partition_0",
+      "type": "GRAPH",
+      "words": 2029
+    }
+  ],
+  "spirv": {
+    "word_count": 2029,
+    "version": "1.5",
+    "id_bound": 331
+  },
+  "inputs": [
+    {
+      "io_index": 0,
+      "tensor_id": 11,
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        12
+      ],
+      "vk_format": "R8_SINT"
+    }
+  ],
+  "outputs": [
+    {
+      "io_index": 0,
+      "tensor_id": 319,
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        36
+      ],
+      "vk_format": "R8_SINT"
+    },
+    {
+      "io_index": 1,
+      "tensor_id": 330,
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        4
+      ],
+      "vk_format": "R8_SINT"
+    }
+  ],
+  "constants": [
+    {
+      "id": 0,
+      "alias_group_id": 4294967295,
+      "size": 36,
+      "offset": 0,
+      "abs_offset": 12856
+    },
+    {
+      "id": 1,
+      "alias_group_id": 4294967295,
+      "size": 144,
+      "offset": 40,
+      "abs_offset": 12896
+    },
+    {
+      "id": 2,
+      "alias_group_id": 4294967295,
+      "size": 32,
+      "offset": 184,
+      "abs_offset": 13040
+    },
+    {
+      "id": 3,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 216,
+      "abs_offset": 13072
+    },
+    {
+      "id": 4,
+      "alias_group_id": 4294967295,
+      "size": 32,
+      "offset": 344,
+      "abs_offset": 13200
+    },
+    {
+      "id": 5,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 376,
+      "abs_offset": 13232
+    },
+    {
+      "id": 6,
+      "alias_group_id": 4294967295,
+      "size": 64,
+      "offset": 504,
+      "abs_offset": 13360
+    },
+    {
+      "id": 7,
+      "alias_group_id": 4294967295,
+      "size": 256,
+      "offset": 568,
+      "abs_offset": 13424
+    },
+    {
+      "id": 8,
+      "alias_group_id": 4294967295,
+      "size": 64,
+      "offset": 824,
+      "abs_offset": 13680
+    },
+    {
+      "id": 9,
+      "alias_group_id": 4294967295,
+      "size": 256,
+      "offset": 888,
+      "abs_offset": 13744
+    },
+    {
+      "id": 10,
+      "alias_group_id": 4294967295,
+      "size": 32,
+      "offset": 1144,
+      "abs_offset": 14000
+    },
+    {
+      "id": 11,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 1176,
+      "abs_offset": 14032
+    },
+    {
+      "id": 12,
+      "alias_group_id": 4294967295,
+      "size": 32,
+      "offset": 1304,
+      "abs_offset": 14160
+    },
+    {
+      "id": 13,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 1336,
+      "abs_offset": 14192
+    },
+    {
+      "id": 14,
+      "alias_group_id": 4294967295,
+      "size": 32,
+      "offset": 1464,
+      "abs_offset": 14320
+    },
+    {
+      "id": 15,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 1496,
+      "abs_offset": 14352
+    },
+    {
+      "id": 16,
+      "alias_group_id": 4294967295,
+      "size": 32,
+      "offset": 1624,
+      "abs_offset": 14480
+    },
+    {
+      "id": 17,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 1656,
+      "abs_offset": 14512
+    },
+    {
+      "id": 18,
+      "alias_group_id": 4294967295,
+      "size": 256,
+      "offset": 1784,
+      "abs_offset": 14640
+    },
+    {
+      "id": 19,
+      "alias_group_id": 4294967295,
+      "size": 256,
+      "offset": 2040,
+      "abs_offset": 14896
+    },
+    {
+      "id": 20,
+      "alias_group_id": 4294967295,
+      "size": 3456,
+      "offset": 2296,
+      "abs_offset": 15152
+    },
+    {
+      "id": 21,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 5752,
+      "abs_offset": 18608
+    },
+    {
+      "id": 22,
+      "alias_group_id": 4294967295,
+      "size": 9216,
+      "offset": 5880,
+      "abs_offset": 18736
+    },
+    {
+      "id": 23,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 15096,
+      "abs_offset": 27952
+    },
+    {
+      "id": 24,
+      "alias_group_id": 4294967295,
+      "size": 9216,
+      "offset": 15224,
+      "abs_offset": 28080
+    },
+    {
+      "id": 25,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 24440,
+      "abs_offset": 37296
+    },
+    {
+      "id": 26,
+      "alias_group_id": 4294967295,
+      "size": 9216,
+      "offset": 24568,
+      "abs_offset": 37424
+    },
+    {
+      "id": 27,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 33784,
+      "abs_offset": 46640
+    },
+    {
+      "id": 28,
+      "alias_group_id": 4294967295,
+      "size": 18432,
+      "offset": 33912,
+      "abs_offset": 46768
+    },
+    {
+      "id": 29,
+      "alias_group_id": 4294967295,
+      "size": 256,
+      "offset": 52344,
+      "abs_offset": 65200
+    },
+    {
+      "id": 30,
+      "alias_group_id": 4294967295,
+      "size": 36864,
+      "offset": 52600,
+      "abs_offset": 65456
+    },
+    {
+      "id": 31,
+      "alias_group_id": 4294967295,
+      "size": 256,
+      "offset": 89464,
+      "abs_offset": 102320
+    },
+    {
+      "id": 32,
+      "alias_group_id": 4294967295,
+      "size": 18432,
+      "offset": 89720,
+      "abs_offset": 102576
+    },
+    {
+      "id": 33,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 108152,
+      "abs_offset": 121008
+    },
+    {
+      "id": 34,
+      "alias_group_id": 4294967295,
+      "size": 4608,
+      "offset": 108280,
+      "abs_offset": 121136
+    },
+    {
+      "id": 35,
+      "alias_group_id": 4294967295,
+      "size": 13824,
+      "offset": 112888,
+      "abs_offset": 125744
+    },
+    {
+      "id": 36,
+      "alias_group_id": 4294967295,
+      "size": 128,
+      "offset": 126712,
+      "abs_offset": 139568
+    },
+    {
+      "id": 37,
+      "alias_group_id": 4294967295,
+      "size": 10368,
+      "offset": 126840,
+      "abs_offset": 139696
+    },
+    {
+      "id": 38,
+      "alias_group_id": 4294967295,
+      "size": 144,
+      "offset": 137208,
+      "abs_offset": 150064
+    },
+    {
+      "id": 39,
+      "alias_group_id": 4294967295,
+      "size": 4608,
+      "offset": 137352,
+      "abs_offset": 150208
+    },
+    {
+      "id": 40,
+      "alias_group_id": 4294967295,
+      "size": 6912,
+      "offset": 141960,
+      "abs_offset": 154816
+    },
+    {
+      "id": 41,
+      "alias_group_id": 4294967295,
+      "size": 2304,
+      "offset": 148872,
+      "abs_offset": 161728
+    },
+    {
+      "id": 42,
+      "alias_group_id": 4294967295,
+      "size": 576,
+      "offset": 151176,
+      "abs_offset": 164032
+    }
+  ],
+  "constant_count": 43,
+  "resources": [
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        36
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        36
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        256
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        256
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        12
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        64,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        64
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        32,
+        3,
+        3,
+        48
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        36,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R32_SINT",
+      "shape": [
+        36
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        32
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        48
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        16,
+        3,
+        3,
+        16
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "CONSTANT",
+      "vk_descriptor_type": 4294967295,
+      "vk_format": "R8_SINT",
+      "shape": [
+        4,
+        3,
+        3,
+        16
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "INPUT",
+      "vk_descriptor_type": 1000460000,
+      "vk_format": "R8_SINT",
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        12
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "OUTPUT",
+      "vk_descriptor_type": 1000460000,
+      "vk_format": "R8_SINT",
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        36
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    },
+    {
+      "category": "OUTPUT",
+      "vk_descriptor_type": 1000460000,
+      "vk_format": "R8_SINT",
+      "shape": [
+        1,
+        -9223372036854775808,
+        -9223372036854775808,
+        4
+      ],
+      "strides": [],
+      "alias_group_id": 4294967295
+    }
+  ],
+  "ops": [
+    {
+      "index": 0,
+      "kind": "CONV2D",
+      "result": 288,
+      "pad": [
+        1,
+        0,
+        1,
+        0
+      ],
+      "stride": [
+        2,
+        2
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "input",
+        "io_index": 0
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 20,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32,
+          3,
+          3,
+          12
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 21,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 1,
+      "kind": "RESCALE",
+      "result": 295,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 0
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 17,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 16,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "kind": "CONV2D",
+      "result": 297,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 1
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 22,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32,
+          3,
+          3,
+          32
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 23,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 3,
+      "kind": "RESCALE",
+      "result": 299,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 2
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 15,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 14,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "kind": "CONV2D",
+      "result": 300,
+      "pad": [
+        1,
+        0,
+        1,
+        0
+      ],
+      "stride": [
+        2,
+        2
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 3
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 24,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32,
+          3,
+          3,
+          32
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 25,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 5,
+      "kind": "RESCALE",
+      "result": 301,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 4
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 13,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 12,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 6,
+      "kind": "CONV2D",
+      "result": 302,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 5
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 26,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32,
+          3,
+          3,
+          32
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 27,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 7,
+      "kind": "RESCALE",
+      "result": 303,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 6
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 11,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 10,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "kind": "CONV2D",
+      "result": 304,
+      "pad": [
+        1,
+        0,
+        1,
+        0
+      ],
+      "stride": [
+        2,
+        2
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 7
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 28,
+        "vk_format": "R8_SINT",
+        "shape": [
+          64,
+          3,
+          3,
+          32
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 29,
+        "vk_format": "R32_SINT",
+        "shape": [
+          64
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 9,
+      "kind": "RESCALE",
+      "result": 305,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 8
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 9,
+        "vk_format": "R32_SINT",
+        "shape": [
+          64
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 8,
+        "vk_format": "R8_SINT",
+        "shape": [
+          64
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 10,
+      "kind": "CONV2D",
+      "result": 306,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 9
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 30,
+        "vk_format": "R8_SINT",
+        "shape": [
+          64,
+          3,
+          3,
+          64
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 31,
+        "vk_format": "R32_SINT",
+        "shape": [
+          64
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 11,
+      "kind": "RESCALE",
+      "result": 307,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 10
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 7,
+        "vk_format": "R32_SINT",
+        "shape": [
+          64
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 6,
+        "vk_format": "R8_SINT",
+        "shape": [
+          64
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 12,
+      "kind": "CONV2D",
+      "result": 308,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 11
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 32,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32,
+          3,
+          3,
+          64
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 33,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 13,
+      "kind": "RESCALE",
+      "result": 309,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 12
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 5,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 4,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 14,
+      "kind": "RESIZE",
+      "result": 310,
+      "mode": "NEAREST",
+      "input": {
+        "kind": "node",
+        "index": 13
+      },
+      "scale": [
+        4,
+        2,
+        4,
+        2
+      ],
+      "offset": "%133",
+      "border": "%131"
+    },
+    {
+      "index": 15,
+      "kind": "CONV2D",
+      "result": 311,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 14
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 34,
+        "vk_format": "R8_SINT",
+        "shape": [
+          16,
+          3,
+          3,
+          32
+        ]
+      },
+      "bias": {
+        "kind": "lit",
+        "value": [
+          2162,
+          13507,
+          4335,
+          2362,
+          4294965504,
+          1497,
+          31290,
+          2546,
+          1389,
+          3746,
+          15959,
+          9075,
+          3698,
+          12147,
+          2048,
+          2045
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 16,
+      "kind": "RESCALE",
+      "result": 312,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 15
+      },
+      "multiplier": {
+        "kind": "lit",
+        "value": [
+          1326994192,
+          1600679187,
+          1096660098,
+          1107291986,
+          1969058889,
+          1582585686,
+          1799963260,
+          1354182298,
+          1923943889,
+          1086457133,
+          1859698732,
+          1481094080,
+          1197280850,
+          1357155204,
+          1255796823,
+          1294512884
+        ]
+      },
+      "shift": {
+        "kind": "lit",
+        "value": [
+          39,
+          40,
+          39,
+          39,
+          39,
+          38,
+          40,
+          38,
+          39,
+          39,
+          40,
+          39,
+          39,
+          39,
+          39,
+          37
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 17,
+      "kind": "CONCAT",
+      "result": 313,
+      "axis": 3,
+      "inputs": [
+        {
+          "kind": "node",
+          "index": 16
+        },
+        {
+          "kind": "node",
+          "index": 7
+        }
+      ]
+    },
+    {
+      "index": 18,
+      "kind": "CONV2D",
+      "result": 314,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 17
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 35,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32,
+          3,
+          3,
+          48
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 36,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 19,
+      "kind": "RESCALE",
+      "result": 315,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 18
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 3,
+        "vk_format": "R32_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 2,
+        "vk_format": "R8_SINT",
+        "shape": [
+          32
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 20,
+      "kind": "CONV2D",
+      "result": 316,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 19
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 37,
+        "vk_format": "R8_SINT",
+        "shape": [
+          36,
+          3,
+          3,
+          32
+        ]
+      },
+      "bias": {
+        "kind": "const",
+        "const_id": 38,
+        "vk_format": "R32_SINT",
+        "shape": [
+          36
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 21,
+      "kind": "RESCALE",
+      "result": 317,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 20
+      },
+      "multiplier": {
+        "kind": "const",
+        "const_id": 1,
+        "vk_format": "R32_SINT",
+        "shape": [
+          36
+        ]
+      },
+      "shift": {
+        "kind": "const",
+        "const_id": 0,
+        "vk_format": "R8_SINT",
+        "shape": [
+          36
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          83
+        ]
+      }
+    },
+    {
+      "index": 22,
+      "kind": "RESIZE",
+      "result": 318,
+      "mode": "NEAREST",
+      "input": {
+        "kind": "node",
+        "index": 19
+      },
+      "scale": [
+        4,
+        2,
+        4,
+        2
+      ],
+      "offset": "%133",
+      "border": "%131"
+    },
+    {
+      "index": 23,
+      "kind": "TABLE",
+      "result": 319,
+      "input": {
+        "kind": "node",
+        "index": 21
+      },
+      "table": {
+        "kind": "const",
+        "const_id": 19,
+        "vk_format": "R8_SINT",
+        "shape": [
+          256
+        ]
+      }
+    },
+    {
+      "index": 24,
+      "kind": "CONV2D",
+      "result": 320,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 22
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 39,
+        "vk_format": "R8_SINT",
+        "shape": [
+          16,
+          3,
+          3,
+          32
+        ]
+      },
+      "bias": {
+        "kind": "lit",
+        "value": [
+          4294965039,
+          4294966323,
+          4294954357,
+          4815,
+          3635,
+          17891,
+          6282,
+          420,
+          3495,
+          4294964990,
+          4294965208,
+          325,
+          4929,
+          3649,
+          4294967275,
+          4479
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 25,
+      "kind": "RESCALE",
+      "result": 321,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 24
+      },
+      "multiplier": {
+        "kind": "lit",
+        "value": [
+          1949375505,
+          1434133298,
+          1540190951,
+          1371885005,
+          1979157143,
+          1166575321,
+          2020446992,
+          1172653983,
+          1205044211,
+          1851535309,
+          1840141093,
+          1839621983,
+          1617698450,
+          1625051327,
+          1241916912,
+          1871213470
+        ]
+      },
+      "shift": {
+        "kind": "lit",
+        "value": [
+          39,
+          38,
+          38,
+          38,
+          39,
+          39,
+          39,
+          37,
+          37,
+          39,
+          37,
+          39,
+          39,
+          38,
+          37,
+          38
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 26,
+      "kind": "CONCAT",
+      "result": 322,
+      "axis": 3,
+      "inputs": [
+        {
+          "kind": "node",
+          "index": 25
+        },
+        {
+          "kind": "node",
+          "index": 3
+        }
+      ]
+    },
+    {
+      "index": 27,
+      "kind": "CONV2D",
+      "result": 323,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 26
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 40,
+        "vk_format": "R8_SINT",
+        "shape": [
+          16,
+          3,
+          3,
+          48
+        ]
+      },
+      "bias": {
+        "kind": "lit",
+        "value": [
+          4294966557,
+          729,
+          2524,
+          2096,
+          2161,
+          1811,
+          3952,
+          4413,
+          1998,
+          4464,
+          1582,
+          4294964708,
+          741,
+          1744,
+          4294966634,
+          767
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 28,
+      "kind": "RESCALE",
+      "result": 324,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 27
+      },
+      "multiplier": {
+        "kind": "lit",
+        "value": [
+          1715440659,
+          1901038840,
+          1369936718,
+          2066358150,
+          1327099699,
+          1364082409,
+          1545543242,
+          1278849435,
+          1335253595,
+          1775751330,
+          1364511043,
+          1605222329,
+          1691751512,
+          1807345044,
+          1273140025,
+          1498855490
+        ]
+      },
+      "shift": {
+        "kind": "lit",
+        "value": [
+          38,
+          37,
+          38,
+          39,
+          38,
+          38,
+          38,
+          39,
+          39,
+          38,
+          38,
+          39,
+          38,
+          39,
+          38,
+          38
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 29,
+      "kind": "CONV2D",
+      "result": 325,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 28
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 41,
+        "vk_format": "R8_SINT",
+        "shape": [
+          16,
+          3,
+          3,
+          16
+        ]
+      },
+      "bias": {
+        "kind": "lit",
+        "value": [
+          2036,
+          4012,
+          1815,
+          4294967056,
+          4294966456,
+          4294966011,
+          3845,
+          1640,
+          2756,
+          4294964979,
+          2902,
+          4294965439,
+          264,
+          3518,
+          2914,
+          1906
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 30,
+      "kind": "RESCALE",
+      "result": 326,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 29
+      },
+      "multiplier": {
+        "kind": "lit",
+        "value": [
+          1252678044,
+          2029890256,
+          2114049259,
+          2130086729,
+          1792996591,
+          1256343781,
+          1371720607,
+          1877506573,
+          1192751262,
+          1171149796,
+          1277152553,
+          1666223081,
+          1626242322,
+          1217513648,
+          1586823235,
+          1531534951
+        ]
+      },
+      "shift": {
+        "kind": "lit",
+        "value": [
+          37,
+          39,
+          38,
+          38,
+          38,
+          37,
+          37,
+          37,
+          37,
+          37,
+          38,
+          38,
+          38,
+          37,
+          37,
+          38
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          128
+        ]
+      }
+    },
+    {
+      "index": 31,
+      "kind": "RESIZE",
+      "result": 327,
+      "mode": "NEAREST",
+      "input": {
+        "kind": "node",
+        "index": 30
+      },
+      "scale": [
+        4,
+        2,
+        4,
+        2
+      ],
+      "offset": "%133",
+      "border": "%131"
+    },
+    {
+      "index": 32,
+      "kind": "CONV2D",
+      "result": 328,
+      "pad": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "input": {
+        "kind": "node",
+        "index": 31
+      },
+      "weight": {
+        "kind": "const",
+        "const_id": 42,
+        "vk_format": "R8_SINT",
+        "shape": [
+          4,
+          3,
+          3,
+          16
+        ]
+      },
+      "bias": {
+        "kind": "lit",
+        "value": [
+          937,
+          4294965832,
+          4294966760,
+          4294958486
+        ]
+      },
+      "input_zero_point": [
+        128
+      ],
+      "weight_zero_point": 0
+    },
+    {
+      "index": 33,
+      "kind": "RESCALE",
+      "result": 329,
+      "scale32": 1,
+      "rounding": "SINGLE_ROUND",
+      "per_channel": 1,
+      "input_unsigned": 0,
+      "output_unsigned": 0,
+      "input": {
+        "kind": "node",
+        "index": 32
+      },
+      "multiplier": {
+        "kind": "lit",
+        "value": [
+          1858166280,
+          2011449672,
+          2032427529,
+          1502085485
+        ]
+      },
+      "shift": {
+        "kind": "lit",
+        "value": [
+          40,
+          41,
+          40,
+          42
+        ]
+      },
+      "input_zero_point": {
+        "kind": "lit",
+        "value": 0
+      },
+      "output_zero_point": {
+        "kind": "lit",
+        "value": [
+          44
+        ]
+      }
+    },
+    {
+      "index": 34,
+      "kind": "TABLE",
+      "result": 330,
+      "input": {
+        "kind": "node",
+        "index": 33
+      },
+      "table": {
+        "kind": "const",
+        "const_id": 18,
+        "vk_format": "R8_SINT",
+        "shape": [
+          256
+        ]
+      }
+    }
+  ]
+}

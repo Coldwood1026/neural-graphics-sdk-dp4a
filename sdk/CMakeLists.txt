@@ -35,7 +35,11 @@ endif()
 message(STATUS "FFX_API_BACKEND is ${FFX_API_BACKEND}")
 
 if (FFX_GRAPHICS_API STREQUAL "dx12")
-	message(FATAL_ERROR "DX12 backend is currently not supported. Please use Vulkan (vk) as the graphics API.")
+	# Restored. The Arm fork deleted the D3D12 backend outright; it is back for one
+	# purpose -- hosting the portable dp4a inference backend on D3D12 -- and it is
+	# deliberately compute-only and data-graph-only. See
+	# sdk/src/backends/dx12/CMakeLists.txt for what is omitted and why.
+	message(STATUS "Building FidelityFX SDK with DX12 backend (dp4a inference host)")
 elseif(FFX_GRAPHICS_API STREQUAL "vk")
 	message(STATUS "Building FidelityFX SDK with VK backend")
 else()
@@ -96,16 +100,19 @@ if(FFX_VS_VERSION STREQUAL 2015 OR FFX_VS_VERSION STREQUAL 2017)
 endif()
 
 # Setup common variables
+# NOTE: VGF_PARSER_EXECUTABLE (the Arm Model Parser) is deliberately no longer set.
+# It serialised the .vgf data-graph models into FfxDataGraphBlob headers for the
+# ARM execution path, which the portable dp4a backend replaces; the descriptors are
+# now checked in by hand under sdk/src/backends/vk/data_graphs/. It also crashed
+# with 0xC0000409 on this repository's own .vgf files.
 if(CMAKE_HOST_WIN32)
 	set(FFX_SC_EXECUTABLE ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/FidelityFX_SC.exe)
 	# we need to use the glslangValidator that supports ML extensions for Vulkan
 	set(FFX_GLSLANG_EXE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/glslangValidator.exe)
-	set(VGF_PARSER_EXECUTABLE ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/Model_Parser.exe)
 else()
 	set(FFX_SC_EXECUTABLE ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/FidelityFX_SC)
 	# we need to use the glslangValidator that supports ML extensions for Vulkan
 	set(FFX_GLSLANG_EXE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/glslangValidator)
-	set(VGF_PARSER_EXECUTABLE ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/Model_Parser)
 endif()
 
 set(FFX_INCLUDE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -199,9 +206,36 @@ if (FFX_GRAPHICS_API STREQUAL "vk")
 	add_subdirectory(${FFX_SRC_BACKENDS_PATH}/vk)
 endif()
 
+# The D3D12 backend is deliberately outside the block above: that block exists to
+# configure and build SPIRV-Tools, which only the Vulkan backend needs (it post-processes
+# SPIR-V for tensor/data-graph capability rewriting). The D3D12 backend compiles no
+# SPIR-V and carries premade DXIL, so building SPIRV-Tools for it would be dead weight --
+# 200 MB of intermediate libraries for nothing.
+if (FFX_GRAPHICS_API STREQUAL "dx12")
+	add_subdirectory(${FFX_SRC_BACKENDS_PATH}/dx12)
+endif()
+
 option(BUILD_TOOLS "Build the tools" OFF)
 message(STATUS "Build tools: ${BUILD_TOOLS}")
 if(BUILD_TOOLS)
 	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tools/ffx_shader_compiler)
 	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tools/ffx_model_parser)
+endif()
+
+# -----------------------------------------------------------------------------
+# NFRU data-graph end-to-end verification.
+#
+# Off by default: it is a test harness, not part of the SDK. When on it links against the
+# SDK dll's import library and drives the backend INTERFACE (fpCreateBackendContext,
+# fpCreateResource with FFX_RESOURCE_TYPE_TENSOR, fpCreateDataGraphPipeline,
+# fpScheduleGpuJob, fpExecuteGpuJobs) with a golden input whose expected output was
+# established against a CPU reference on real hardware.
+#
+# Placed here, after the backend subdirectory, so ${SDK_LIB_NAME} is already a known
+# target and ${FFX_INCLUDE_PATH} and friends are in scope.
+# -----------------------------------------------------------------------------
+option(FFX_BUILD_NFRU_TEST "Build the NFRU data-graph verification harness" OFF)
+if (FFX_BUILD_NFRU_TEST)
+	message(STATUS "Building the NFRU data-graph verification harness")
+	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/test/nfru_datagraph)
 endif()
