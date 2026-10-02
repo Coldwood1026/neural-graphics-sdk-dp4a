@@ -5815,6 +5815,9 @@ FfxErrorCode CreateDataGraphPipelineVK(FfxInterface*                 backendInte
         ci.vkGetInstanceProcAddr = nullptr;
         ci.width  = dataGraphWidth;
         ci.height = dataGraphHeight;
+        /* Say which API this is rather than relying on the library's default, which is
+         * only Vulkan by accident. */
+        ci.backend = NFRU_DP4A_BACKEND_VULKAN;
 
         NfruDp4aContext* dp4a = nullptr;
         if (nfruDp4aCreateContext(&ci, &dp4a) != NFRU_DP4A_OK)

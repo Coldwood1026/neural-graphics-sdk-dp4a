@@ -104,8 +104,17 @@ function(compile_shaders_with_depfile
 	if (SHADER_EXT STREQUAL ".HLSL")
 		set(SUPPORT_WAVE64 ON)
 		set(INCLUDE_SPACE " ")
-		set(HLSL_WAVE64_ARGS "-DFFX_PREFER_WAVE64=\"[WaveSize(64)]\"" "-DFFX_HLSL_SM=66" -T cs_6_6)
-		set(HLSL_WAVE32_ARGS "-DFFX_HLSL_SM=62" -T cs_6_2)
+		# A caller may set FFX_SHADER_STAGE_TARGET to compile a stage other than compute.
+		#
+		# The -T below is appended AFTER the caller's own API arguments, so a caller-supplied
+		# -T would be overridden by it and the last one wins: a pixel shader would be compiled
+		# as compute and dxc would reject the entry point. Parameterising the suffix is what
+		# lets one driver serve all three stages. Unset it means compute, as before.
+		if (NOT FFX_SHADER_STAGE_TARGET)
+			set(FFX_SHADER_STAGE_TARGET cs)
+		endif()
+		set(HLSL_WAVE64_ARGS "-DFFX_PREFER_WAVE64=\"[WaveSize(64)]\"" "-DFFX_HLSL_SM=66" -T ${FFX_SHADER_STAGE_TARGET}_6_6)
+		set(HLSL_WAVE32_ARGS "-DFFX_HLSL_SM=62" -T ${FFX_SHADER_STAGE_TARGET}_6_2)
 		set(HLSL_16BIT_ARGS "-enable-16bit-types")
 	endif()
 	# GLSL requires no spaces: -I<include0> -I<include1> etc.

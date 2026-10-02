@@ -15,7 +15,7 @@ float SingleTapDepthClip(float current_depth, float previous_depth)
         Kits/FidelityFX/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_disocclusion_mask.h#L65
     */
 
-    const float2 render_size            = float2(RenderSize());
+    const float2 render_size            = float2(RenderSize().x, RenderSize().y);
     const float  fCurrentDepthViewSpace = ConvertFromDeviceDepthToViewSpace(current_depth);
 
     const float fPrevDepthSample           = previous_depth;
@@ -115,7 +115,7 @@ void preprocess(int32_t2 input_pixel)
 {
     int32_t2 padded_output_pixel = input_pixel;
     int32_t2 renderSize          = RenderSize();
-    float2   render_size         = float2(renderSize);
+    float2   render_size         = float2(renderSize.x, renderSize.y);
     int32_t2 mvDepthLane         = MvDepthLaneSize();
     int32_t2 flowLane            = FlowLaneSize();
     if (any(greaterThanEqual(padded_output_pixel, InputTensorSize())))
@@ -135,8 +135,8 @@ void preprocess(int32_t2 input_pixel)
     float2 invFlowLane = FlowLaneSizeRcp();
     float2 uv          = ((output_pixel.xy) + 0.5f) * invFlowLane;
 
-    int32_t2 iMvCoord   = int32_t2(floor(uv * float2(mvDepthLane)));
-    int32_t2 iFlowCoord = int32_t2(floor(uv * float2(flowLane)));
+    int32_t2 iMvCoord   = int32_t2(floor(uv * float2(mvDepthLane.x, mvDepthLane.y)));
+    int32_t2 iFlowCoord = int32_t2(floor(uv * float2(flowLane.x, flowLane.y)));
 
     // Read Vectors warped to "t" position - sampling nearest
     FFX_MIN16_F2 flow_t_f30_p1 = LoadWarpedFilledFlowTM1(iFlowCoord);
@@ -168,10 +168,10 @@ void preprocess(int32_t2 input_pixel)
 
     // Warp colour using gather approach with warped vectors
 
-    FFX_MIN16_F3 rgb_m1_warp_t_mv   = FFX_MIN16_F3(0.0f);
-    FFX_MIN16_F3 rgb_p1_warp_t_mv   = FFX_MIN16_F3(0.0f);
-    FFX_MIN16_F3 rgb_m1_warp_t_flow = FFX_MIN16_F3(0.0f);
-    FFX_MIN16_F3 rgb_p1_warp_t_flow = FFX_MIN16_F3(0.0f);
+    FFX_MIN16_F3 rgb_m1_warp_t_mv   = FFX_MIN16_F3(0.0f, 0.0f, 0.0f);
+    FFX_MIN16_F3 rgb_p1_warp_t_mv   = FFX_MIN16_F3(0.0f, 0.0f, 0.0f);
+    FFX_MIN16_F3 rgb_m1_warp_t_flow = FFX_MIN16_F3(0.0f, 0.0f, 0.0f);
+    FFX_MIN16_F3 rgb_p1_warp_t_flow = FFX_MIN16_F3(0.0f, 0.0f, 0.0f);
 
     if (!uv_m1_mv_oob)
         rgb_m1_warp_t_mv = LoadPreviousBackbuffer(int32_t2(uv_m1_mv * DisplaySize()));
@@ -214,7 +214,7 @@ void preprocess(int32_t2 input_pixel)
     float    depth_p1_warp_t_mv = LoadInputDepthTp1Pixel(depth_p1_pixel);
 
     // OOB depth should be near plane value
-    if (!IsOnScreen(depth_m1_pixel, int32_t2(depth_tm1_size)))
+    if (!IsOnScreen(depth_m1_pixel, int32_t2(depth_tm1_size.x, depth_tm1_size.y)))
     {
 #if FFX_ARM_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH
         depth_m1_warp_t_mv = 1.0f;
@@ -223,7 +223,7 @@ void preprocess(int32_t2 input_pixel)
 #endif
     }
 
-    if (!IsOnScreen(depth_p1_pixel, int32_t2(depth_tp1_size)))
+    if (!IsOnScreen(depth_p1_pixel, int32_t2(depth_tp1_size.x, depth_tp1_size.y)))
     {
 #if FFX_ARM_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH
         depth_p1_warp_t_mv = 1.0f;

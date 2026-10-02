@@ -5,9 +5,11 @@
  * validation, lifetime management and choosing a backend; everything numeric lives in
  * the shaders and the graph.
  *
- * Backend selection: the Vulkan path is the default. `NFRU_DP4A_BACKEND=dx12` or
- * `=vulkan` forces one, which is useful when validating that the two produce identical
- * results.
+ * Backend selection: NfruDp4aCreateInfo::backend decides, because only the caller knows
+ * whether it handed over a VkInstance or an ID3D12Device. NFRU_DP4A_BACKEND_AUTO keeps the
+ * historical behaviour -- the `NFRU_DP4A_BACKEND=dx12` / `=vulkan` environment variable,
+ * and Vulkan when that is unset -- which is what the standalone regression harness uses
+ * when it runs the same graph through both APIs and compares the bytes.
  *
  * Interface style follows the FidelityFX convention (FfxErrorCode-style returns plus
  * descriptor structs plus an opaque context) so that `ffx_vk.cpp` can call it from
@@ -28,8 +30,15 @@ namespace {
 
 enum BackendKind { kBackendVulkan = 0, kBackendDx12 = 1 };
 
-BackendKind ChooseBackend()
+BackendKind ChooseBackend(const NfruDp4aCreateInfo* createInfo)
 {
+    /* Explicit request wins: the caller knows which API it is holding. */
+    if (createInfo != nullptr) {
+        if (createInfo->backend == NFRU_DP4A_BACKEND_DX12)   return kBackendDx12;
+        if (createInfo->backend == NFRU_DP4A_BACKEND_VULKAN) return kBackendVulkan;
+    }
+
+    /* AUTO: the standalone harness selects the API this way. */
     const char* env = getenv("NFRU_DP4A_BACKEND");
     if (env) {
         if (_stricmp(env, "dx12") == 0 || _stricmp(env, "d3d12") == 0) return kBackendDx12;
@@ -76,7 +85,7 @@ nfruDp4aCreateContext(const NfruDp4aCreateInfo* createInfo, NfruDp4aContext** ou
 
     NfruDp4aContext* ctx = new NfruDp4aContext();
     memset(ctx->err, 0, sizeof(ctx->err));
-    ctx->backend = ChooseBackend();
+    ctx->backend = ChooseBackend(createInfo);
     ctx->width = createInfo->width;
     ctx->height = createInfo->height;
     ctx->device = nullptr;

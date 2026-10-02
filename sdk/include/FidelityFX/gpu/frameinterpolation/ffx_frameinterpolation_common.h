@@ -84,7 +84,7 @@ BilinearSamplingData GetBilinearSamplingData(FfxFloat32x2 fUv, FfxInt32x2 iSize)
 
 FfxBoolean IsOnScreen(FfxInt32x2 pos, FfxInt32x2 size)
 {
-    return all(FFX_LESS_THAN(FfxUInt32x2(pos), FfxUInt32x2(size))) && all(FFX_GREATER_THAN_EQUAL(FfxUInt32x2(pos), FfxUInt32x2(0)));
+    return all(FFX_LESS_THAN(FfxUInt32x2(pos), FfxUInt32x2(size.xx))) && all(FFX_GREATER_THAN_EQUAL(FfxUInt32x2(pos), FfxUInt32x2(0, 0)));
 }
 
 FfxBoolean IsUvInside(FfxFloat32x2 fUv)
@@ -438,22 +438,22 @@ int8_t Quantize(FFX_MIN16_F f, FFX_MIN16_F2 quant_params)
 
 int8_t2 Quantize(FFX_MIN16_F2 f, FFX_MIN16_F2 quant_params)
 {
-    return int8_t2(clamp(round(f * quant_params.x + quant_params.y), FFX_MIN16_F2(-128.HF), FFX_MIN16_F2(127.HF)));
+    return int8_t2(clamp(round(f * quant_params.x + quant_params.y), FFX_MIN16_F2(-128.HF, -128.HF), FFX_MIN16_F2(127.HF, 127.HF)));
 }
 
 int8_t2 QuantizeFloat(FfxFloat32x2 f, FFX_MIN16_F2 quant_params)
 {
-    return int8_t2(clamp(round(f * quant_params.x + quant_params.y), FfxFloat32x2(-128.F), FfxFloat32x2(127.F)));
+    return int8_t2(clamp(round(f * quant_params.x + quant_params.y), FfxFloat32x2(-128.0f, -128.0f), FfxFloat32x2(127.0f, 127.0f)));
 }
 
 int8_t3 Quantize(FFX_MIN16_F3 f, FFX_MIN16_F2 quant_params)
 {
-    return int8_t3(clamp(round(f * quant_params.x + quant_params.y), FFX_MIN16_F3(-128.HF), FFX_MIN16_F3(127.HF)));
+    return int8_t3(clamp(round(f * quant_params.x + quant_params.y), FFX_MIN16_F3(-128.HF, -128.HF, -128.HF), FFX_MIN16_F3(127.HF, 127.HF, 127.HF)));
 }
 
 int8_t4 Quantize(FFX_MIN16_F4 f, FFX_MIN16_F2 quant_params)
 {
-    return int8_t4(clamp(round(f * quant_params.x + quant_params.y), FFX_MIN16_F4(-128.HF), FFX_MIN16_F4(127.HF)));
+    return int8_t4(clamp(round(f * quant_params.x + quant_params.y), FFX_MIN16_F4(-128.HF, -128.HF, -128.HF, -128.HF), FFX_MIN16_F4(127.HF, 127.HF, 127.HF, 127.HF)));
 }
 
 #endif  // #if defined(FFX_GPU)

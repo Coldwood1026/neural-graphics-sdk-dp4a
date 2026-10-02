@@ -48,7 +48,7 @@ FFX_MIN16_F3 DynamicMaskOverlayColor()
 FFX_MIN16_F LoadDynamicMaskTp1(FfxFloat32x2 uv)
 {
     FfxInt32x2 iMaskSize = MvDepthLaneSize();
-    FfxInt32x2 maskCoord = clamp(FfxInt32x2(uv * FfxFloat32x2(iMaskSize)), FfxInt32x2(0, 0), iMaskSize - FfxInt32x2(1, 1));
+    FfxInt32x2 maskCoord = clamp(FfxInt32x2(uv * FfxFloat32x2(iMaskSize.x, iMaskSize.y)), FfxInt32x2(0, 0), iMaskSize - FfxInt32x2(1, 1));
     return FFX_MIN16_F(LoadDynamicMaskTp1(maskCoord));
 }
 
@@ -75,9 +75,9 @@ void computeDebugView(FfxInt32x2 outputPos)
     FfxInt32x2 posInViewport = outputPos - FfxInt32x2(gridX, gridY) * iViewportSize;
 
     // Map viewport position to tensor coordinate via UV
-    FfxFloat32x2 uv          = (FfxFloat32x2(posInViewport) + 0.5f) / FfxFloat32x2(iViewportSize);
+    FfxFloat32x2 uv          = (FfxFloat32x2(posInViewport) + 0.5f) / FfxFloat32x2(iViewportSize.x, iViewportSize.y);
     FfxInt32x2   iTensorSize = FfxInt32x2(InputTensorSize());
-    FfxInt32x2   tensorCoord = clamp(FfxInt32x2(uv * FfxFloat32x2(iTensorSize)), FfxInt32x2(0, 0), iTensorSize - FfxInt32x2(1, 1));
+    FfxInt32x2   tensorCoord = clamp(FfxInt32x2(uv * FfxFloat32x2(iTensorSize.x, iTensorSize.y)), FfxInt32x2(0, 0), iTensorSize - FfxInt32x2(1, 1));
 
     // Load and dequantize tensor data at the computed coordinate
     DequantizedTensorElement_t inTensor;

@@ -254,3 +254,22 @@ if (FFX_BUILD_NFRU_TEST)
 	message(STATUS "Building the NFRU data-graph verification harness")
 	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/test/nfru_datagraph)
 endif()
+
+# -----------------------------------------------------------------------------
+# Frame interpolation execution check.
+#
+# Off by default, same reasoning as above. Where the NFRU harness compares numbers, this
+# one answers a question that had never been asked: does Arm's frame interpolation actually
+# RUN? Every claim about it up to now -- that the shaders compile, that the accessor serves
+# all ten passes, that both backends link -- is a statement about compilation. The D3D12
+# execution path added for it (CreateGraphicsPipelineDX12, executeGpuJobFragmentDX12,
+# FFX_GPU_JOB_FRAGMENT) only runs when a fragment pass is dispatched.
+#
+# It establishes that the effect runs to completion on both APIs. It does NOT check that
+# the interpolated frame is correct; there is no reference image.
+# -----------------------------------------------------------------------------
+option(FFX_BUILD_FI_TEST "Build the frame interpolation execution check" OFF)
+if (FFX_BUILD_FI_TEST)
+	message(STATUS "Building the frame interpolation execution check")
+	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/test/frameinterpolation)
+endif()

@@ -24,7 +24,7 @@ void downsample_of_colour(int32_t2 output_pixel)
 
     // Nearest-neighbor downsample with coordinate mapping
     FfxFloat32x2 scale       = FfxFloat32x2(input_dims) / FfxFloat32x2(output_dims);
-    int32_t2     input_pixel = int32_t2(round((FfxFloat32x2(output_pixel) + 0.5f) * scale - 0.5f));
-    input_pixel              = clamp(input_pixel, int32_t2(0), input_dims - int32_t2(1));
+    int32_t2     input_pixel = int32_t2(round((FfxFloat32x2(output_pixel.x, output_pixel.y) + 0.5f) * scale - 0.5f));
+    input_pixel              = clamp(input_pixel, int32_t2(0, 0), input_dims - int32_t2(1, 1));
     StoreColourP1Internal(output_pixel, LoadCurrentBackbuffer(input_pixel));
 }

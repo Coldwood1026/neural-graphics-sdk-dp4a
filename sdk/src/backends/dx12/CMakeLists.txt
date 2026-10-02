@@ -114,7 +114,11 @@ list(APPEND PRIVATE_SOURCE ${NSS_DP4A_DX12_SOURCE})
 # headers, so they are not a licensing question.
 set(NSS_OF_ACCESSOR_SOURCE
     "${FFX_SRC_BACKENDS_PATH}/shared/blob_accessors/ffx_opticalflow_shaderblobs.cpp"
-    "${FFX_SRC_BACKENDS_PATH}/shared/blob_accessors/ffx_spd_shaderblobs.cpp")
+    "${FFX_SRC_BACKENDS_PATH}/shared/blob_accessors/ffx_spd_shaderblobs.cpp"
+    # Arm's frame interpolation. It generates the permutation headers the D3D12 shader
+    # list produces and serves all ten of its passes; without this the shaders compile but
+    # nothing can reach them.
+    "${FFX_SRC_BACKENDS_PATH}/shared/blob_accessors/ffx_frameinterpolation_shaderblobs.cpp")
 list(APPEND PRIVATE_SOURCE ${NSS_OF_ACCESSOR_SOURCE})
 
 file(GLOB_RECURSE PUBLIC_SOURCE "${FFX_HOST_BACKENDS_PATH}/dx12/*.h")
@@ -218,6 +222,18 @@ if (FFX_OF OR FFX_ALL)
     # SPD first: the luminance pyramid pass includes spd/ffx_spd.h.
     include (CMakeShadersSPD.txt)
     include (CMakeShadersOpticalflow.txt)
+endif()
+
+# Arm's neural frame interpolation, which replaced AMD's.
+#
+# The fork never built these for D3D12: its dx12 shader directory held only the
+# swapchain's UI composition shaders, so `FFX_FI` here selects a different shader list
+# than it does on the Vulkan side, where CMakeShadersArmFrameinterpolation.txt is GLSL.
+# The HLSL entry points and the callbacks header they include are the half the fork left
+# unwritten; see the note at the top of CMakeShadersArmFrameinterpolation.txt for what
+# that entails.
+if (FFX_FI OR FFX_ALL)
+    include (CMakeShadersArmFrameinterpolation.txt)
 endif()
 
 if (FFX_SC_PERMUTATION_OUTPUTS)

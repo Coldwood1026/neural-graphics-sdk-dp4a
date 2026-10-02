@@ -42,6 +42,7 @@
 /* The same descriptors the Vulkan backend serves. */
 #include <nfru_v1_int8.h>
 #include "blob_accessors/ffx_opticalflow_shaderblobs.h"
+#include "blob_accessors/ffx_frameinterpolation_shaderblobs.h"
 #include <nss_v1_0_1_high_int8.h>
 #include <nss_v1_0_1_mid_low_int8.h>
 
@@ -88,6 +89,25 @@ FfxErrorCode ffxGetPermutationBlobByIndex(
         case ARM_EFFECT_OPTICALFLOW:
             return opticalflowGetPermutationBlobByIndex(
                 (FfxOpticalflowPass)passId, permutationOptions, outBlob, outVertBlob);
+
+        case ARM_EFFECT_FRAMEINTERPOLATION:
+            /*
+             * Arm's neural frame interpolation. Its Vulkan half was written first and this
+             * half follows it: the shaders, the HLSL callbacks header they include, and the
+             * permutation headers the accessor pulls in are all in the tree now.
+             *
+             * The accessor serves all ten passes and fills outVertBlob for the eight
+             * fragment ones, which is why the widened five-argument form above matters.
+             *
+             * Reachability is not the same as working. Compiling a pixel shader is not
+             * running one: this backend still has no graphics pipeline creation and no
+             * FFX_GPU_JOB_FRAGMENT execution, so a fragment pass will fail later, at
+             * pipeline creation, rather than here. Serving the blob is the correct thing to
+             * do regardless -- the alternative is a zeroed blob that asserts somewhere less
+             * informative.
+             */
+            return frameInterpolationGetPermutationBlobByIndex(
+                (FfxFrameInterpolationPass)passId, permutationOptions, outBlob, outVertBlob, outDataGraphBlob);
 
         default:
             /* Everything else still has no shader here, and saying so is better than

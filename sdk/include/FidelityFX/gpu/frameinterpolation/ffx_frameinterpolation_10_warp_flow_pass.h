@@ -13,16 +13,16 @@ half2 CalculateCameraMotion(float2 uv, float depth, mat4 MotionMat, FFX_PARAMETE
 {
     float2 uvT    = float2(uv.x, 1.0f - uv.y);
     float4 clip   = float4(2.0f * uvT - 1.0f, depth, 1.0f);
-    float4 reproj = MotionMat * clip;
+    float4 reproj = FFX_TRANSFORM_VECTOR(MotionMat, clip);
     mask          = half(reproj.w < 0);
     float2 uvProj = ((reproj.xy / reproj.w) + 1.0f) * 0.5f;
 
     float2 velocity = uvT - uvProj;
 
     float basically_0_motion = 1e-5f;
-    velocity                 = all(lessThan(abs(velocity), float2(basically_0_motion))) ? float2(0.0f) : velocity;
-    velocity                 = any(isnan(velocity)) ? float2(0.0f) : velocity;
-    velocity                 = any(isinf(velocity)) ? float2(0.0f) : velocity;
+    velocity                 = all(lessThan(abs(velocity), float2(basically_0_motion, basically_0_motion))) ? float2(0.0f, 0.0f) : velocity;
+    velocity                 = any(isnan(velocity)) ? float2(0.0f, 0.0f) : velocity;
+    velocity                 = any(isinf(velocity)) ? float2(0.0f, 0.0f) : velocity;
 
     return half2(-velocity.x, velocity.y);
 }
@@ -38,7 +38,7 @@ FFX_MIN16_F2 quantise(FFX_MIN16_F2 x)
     const int32_t max_int   = (1 << full_bits) - 1;
     FFX_MIN16_F   c         = FFX_MIN16_F(max_int) / FFX_MIN16_F(_MAX_VAL);
     int32_t2      q         = int32_t2(clamp(sym_ceil(x * c), FFX_MIN16_F(-_MAX_VAL), FFX_MIN16_F(_MAX_VAL)));
-    return FFX_MIN16_F2(q) / c;
+    return FFX_MIN16_F2(q.x, q.y) / c;
 }
 
 FFX_MIN16_F dynamic_mask_v5(FFX_MIN16_F2 a, FFX_MIN16_F2 b, FFX_MIN16_F eps, FFX_MIN16_F tau)
@@ -157,7 +157,7 @@ void warp_flow(int32_t2 output_pixel)
     uint8_t dynamic_mask_p1 = uint8_t(
 #if NEW_DYNAMIC_MASK
         dynamic_mask_v5(
-            cm_p1_f30_m1 * FFX_MIN16_F2(renderSize), mv_p1_f30_m1 * FFX_MIN16_F2(renderSize), MvSimilarityThreshold(), MvSimilarityNoiseThreshold()) >
+            cm_p1_f30_m1 * FFX_MIN16_F2(renderSize.x, renderSize.y), mv_p1_f30_m1 * FFX_MIN16_F2(renderSize.x, renderSize.y), MvSimilarityThreshold(), MvSimilarityNoiseThreshold()) >
         FFX_MIN16_F(0.0)
 #else
         dynamic_mask_v4(cm_p1_f30_m1, mv_p1_f30_m1, MvSimilarityThreshold(), MvSimilarityNoiseThreshold()) > FFX_MIN16_F(0.0)

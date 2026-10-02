@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
+
+# -----------------------------------------------------------------------------
+# Arm's neural frame interpolation, D3D12 side.
+#
+# The Vulkan half builds with `compile_all_shaders`, a fork-specific wrapper that
+# appends "-S comp" / "-S frag" / "-S vert" to one shared set of glslang arguments.
+# That wrapper is GLSL-only. Rather than grow a second stage-aware wrapper in the
+# driver, this list calls the ordinary `compile_shaders_with_depfile` once per stage
+# with the right -E/-T pair. The driver already parameterises everything else.
+#
+# Three things differ from the Vulkan list beyond the stage flags:
+#
+#   * `-DFFX_HLSL=1` instead of `-DFFX_GLSL=1`.
+#   * No `-glslangexe=`; dxc is resolved by the shader compiler itself, with
+#     dxcompiler.dll and dxil.dll beside it in sdk/tools/binary_store.
+#   * `-T` shader models per stage. cs_6_2 is what AMD 1.1.3's own D3D12 lists use.
+#
+# `-DFFX_8_BIT_TYPES=1` is kept from the Vulkan list. Arm's effect carries its
+# intermediate flow and motion data as quantised 8-bit values (see `quant.h` and the
+# `FFX_EXT_shader_8bit_storage` usage in the GLSL callbacks), so the shaders need to
+# know they may use 8-bit types. Whether DXIL can honour that is answered in the
+# callbacks header; this flag is what lets the shader headers choose.
+# -----------------------------------------------------------------------------
+
+set(ARM_FRAMEINTERPOLATION_DX12_BASE_ARGS
+    -DOUTPUT_IMG_FORMAT=r11f_g11f_b10f
+    -reflection -deps=gcc -DFFX_GPU=1 -DFFX_8_BIT_TYPES=1)
+
+if(WIN32)
+    set(ARM_FRAMEINTERPOLATION_DX12_PERMUTATION_ARGS
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS={0,1}
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_JITTER_MOTION_VECTORS={0,1}
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH={0,1}
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_ENABLE_DATA_GRAPH_FI={0,1}
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_SUPPORT_TENSOR={0,1}
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_MANAGE_PREVIOUS_DEPTH={0,1}
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_MANAGE_PREVIOUS_COLOR={0,1})
+else()
+    set(ARM_FRAMEINTERPOLATION_DX12_PERMUTATION_ARGS
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS="{0,1}"
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_JITTER_MOTION_VECTORS="{0,1}"
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH="{0,1}"
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_ENABLE_DATA_GRAPH_FI="{0,1}"
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_SUPPORT_TENSOR="{0,1}"
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_MANAGE_PREVIOUS_DEPTH="{0,1}"
+        -DFFX_ARM_FRAMEINTERPOLATION_OPTION_MANAGE_PREVIOUS_COLOR="{0,1}")
+endif()
+
+# Language selection for the shared algorithm headers is handled inside the headers
+# themselves: the entry points here and the Vulkan ones include the same
+# "ffx_frameinterpolation_XX_*.h" pass headers, and those reach their callbacks layer
+# through ffx_frameinterpolation_callbacks_glsl.h, which now dispatches to the HLSL
+# callbacks when -DFFX_HLSL=1 (this list) and falls through to the original GLSL body
+# otherwise. Include order therefore does not matter and this list keeps AMD's order.
+set(ARM_FRAMEINTERPOLATION_DX12_INCLUDE_ARGS
+	"${FFX_GPU_PATH}"
+	"${FFX_GPU_PATH}/frameinterpolation")
+
+# Compute: everything that is not a pixel or vertex shader.
+file(GLOB ARM_FRAMEINTERPOLATION_DX12_SHADERS_COMP
+    "shaders/frameinterpolation/*.hlsl"
+)
+list(FILTER ARM_FRAMEINTERPOLATION_DX12_SHADERS_COMP EXCLUDE REGEX ".*_ps\\.hlsl$")
+list(FILTER ARM_FRAMEINTERPOLATION_DX12_SHADERS_COMP EXCLUDE REGEX ".*_fs\\.hlsl$")
+list(FILTER ARM_FRAMEINTERPOLATION_DX12_SHADERS_COMP EXCLUDE REGEX ".*_vs\\.hlsl$")
+
+# Pixel: the fork emits these as `_fs` in GLSL. The HLSL files may arrive under either
+# name, so both are globbed and then de-duplicated by the stage split above.
+file(GLOB ARM_FRAMEINTERPOLATION_DX12_SHADERS_PIX
+    "shaders/frameinterpolation/*_ps.hlsl"
+    "shaders/frameinterpolation/*_fs.hlsl"
+)
+
+file(GLOB ARM_FRAMEINTERPOLATION_DX12_SHADERS_VERT
+    "shaders/frameinterpolation/*_vs.hlsl"
+)
+
+set(ARM_FRAMEINTERPOLATION_DX12_API_COMP_ARGS
+    -E CS -Wno-for-redefinition -Wno-ambig-lit-shift -DFFX_HLSL=1)
+set(ARM_FRAMEINTERPOLATION_DX12_API_PIX_ARGS
+    -E PS -Wno-for-redefinition -Wno-ambig-lit-shift -DFFX_HLSL=1)
+set(ARM_FRAMEINTERPOLATION_DX12_API_VERT_ARGS
+    -E VS -Wno-for-redefinition -Wno-ambig-lit-shift -DFFX_HLSL=1)
+
+set(FFX_SHADER_STAGE_TARGET cs)
+if (ARM_FRAMEINTERPOLATION_DX12_SHADERS_COMP)
+    compile_shaders_with_depfile(
+        "${FFX_SC_EXECUTABLE}"
+        "${ARM_FRAMEINTERPOLATION_DX12_BASE_ARGS}" "${ARM_FRAMEINTERPOLATION_DX12_API_COMP_ARGS}"
+        "${ARM_FRAMEINTERPOLATION_DX12_PERMUTATION_ARGS}" "${ARM_FRAMEINTERPOLATION_DX12_INCLUDE_ARGS}"
+        "${ARM_FRAMEINTERPOLATION_DX12_SHADERS_COMP}" "${FFX_PASS_SHADER_OUTPUT_PATH}"
+        ARM_FRAMEINTERPOLATION_DX12_COMP_OUTPUTS)
+    add_shader_output("${ARM_FRAMEINTERPOLATION_DX12_COMP_OUTPUTS}")
+endif()
+
+set(FFX_SHADER_STAGE_TARGET ps)
+if (ARM_FRAMEINTERPOLATION_DX12_SHADERS_PIX)
+    compile_shaders_with_depfile(
+        "${FFX_SC_EXECUTABLE}"
+        "${ARM_FRAMEINTERPOLATION_DX12_BASE_ARGS}" "${ARM_FRAMEINTERPOLATION_DX12_API_PIX_ARGS}"
+        "${ARM_FRAMEINTERPOLATION_DX12_PERMUTATION_ARGS}" "${ARM_FRAMEINTERPOLATION_DX12_INCLUDE_ARGS}"
+        "${ARM_FRAMEINTERPOLATION_DX12_SHADERS_PIX}" "${FFX_PASS_SHADER_OUTPUT_PATH}"
+        ARM_FRAMEINTERPOLATION_DX12_PIX_OUTPUTS)
+    add_shader_output("${ARM_FRAMEINTERPOLATION_DX12_PIX_OUTPUTS}")
+endif()
+
+set(FFX_SHADER_STAGE_TARGET vs)
+if (ARM_FRAMEINTERPOLATION_DX12_SHADERS_VERT)
+    compile_shaders_with_depfile(
+        "${FFX_SC_EXECUTABLE}"
+        "${ARM_FRAMEINTERPOLATION_DX12_BASE_ARGS}" "${ARM_FRAMEINTERPOLATION_DX12_API_VERT_ARGS}"
+        "${ARM_FRAMEINTERPOLATION_DX12_PERMUTATION_ARGS}" "${ARM_FRAMEINTERPOLATION_DX12_INCLUDE_ARGS}"
+        "${ARM_FRAMEINTERPOLATION_DX12_SHADERS_VERT}" "${FFX_PASS_SHADER_OUTPUT_PATH}"
+        ARM_FRAMEINTERPOLATION_DX12_VERT_OUTPUTS)
+    add_shader_output("${ARM_FRAMEINTERPOLATION_DX12_VERT_OUTPUTS}")
+endif()

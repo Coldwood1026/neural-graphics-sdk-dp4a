@@ -32,6 +32,67 @@
 #include <nfru_v1_int8.h>
 
 // Normal permutations
+/*
+ * FfxShaderBlob compatibility with the 1.1.3 shader compiler.
+ *
+ * The macro this system header defines lists fifteen reflection members that the Arm fork
+ * added for its data-graph path -- numRTTextures, numSRVTensors, numUAVTensors and the
+ * rtTexture* / srvTensor* / uavTensor* pointers. AMD 1.1.3's compiler does not emit them,
+ * and it is the only compiler here that can build HLSL at all, which is what these passes
+ * are. None of the frame interpolation passes has a ray-tracing texture or a tensor, so
+ * zero is the correct reflection rather than a placeholder.
+ *
+ * The three counts sit between the acceleration-structure count and the name pointers; the
+ * twelve pointers sit at the end. Order is fixed by FfxShaderBlob.
+ */
+#undef POPULATE_SHADER_BLOB_FFX
+#define POPULATE_SHADER_BLOB_FFX(info, index)                                                    \
+    {                                                                                            \
+        info[index].blobData,                                                                    \
+        info[index].blobSize,                                                                    \
+        info[index].numConstantBuffers,                                                          \
+        info[index].numSRVTextures,                                                              \
+        info[index].numUAVTextures,                                                              \
+        info[index].numSRVBuffers,                                                               \
+        info[index].numUAVBuffers,                                                               \
+        info[index].numSamplers,                                                                 \
+        info[index].numRTAccelerationStructures,                                                 \
+        0u,                                                                                      \
+        0u,                                                                                      \
+        0u,                                                                                      \
+        info[index].constantBufferNames,                                                         \
+        info[index].constantBufferBindings,                                                      \
+        info[index].constantBufferCounts,                                                        \
+        info[index].constantBufferSpaces,                                                        \
+        info[index].srvTextureNames,                                                             \
+        info[index].srvTextureBindings,                                                          \
+        info[index].srvTextureCounts,                                                            \
+        info[index].srvTextureSpaces,                                                            \
+        info[index].uavTextureNames,                                                             \
+        info[index].uavTextureBindings,                                                          \
+        info[index].uavTextureCounts,                                                            \
+        info[index].uavTextureSpaces,                                                            \
+        info[index].srvBufferNames,                                                              \
+        info[index].srvBufferBindings,                                                           \
+        info[index].srvBufferCounts,                                                             \
+        info[index].srvBufferSpaces,                                                             \
+        info[index].uavBufferNames,                                                              \
+        info[index].uavBufferBindings,                                                           \
+        info[index].uavBufferCounts,                                                             \
+        info[index].uavBufferSpaces,                                                             \
+        info[index].samplerNames,                                                                \
+        info[index].samplerBindings,                                                             \
+        info[index].samplerCounts,                                                               \
+        info[index].samplerSpaces,                                                               \
+        info[index].rtAccelerationStructureNames,                                                \
+        info[index].rtAccelerationStructureBindings,                                             \
+        info[index].rtAccelerationStructureCounts,                                               \
+        info[index].rtAccelerationStructureSpaces,                                               \
+        nullptr, nullptr, nullptr, nullptr,                                                      \
+        nullptr, nullptr, nullptr, nullptr,                                                      \
+        nullptr, nullptr, nullptr, nullptr                                                       \
+    }
+
 #include <ffx_frameinterpolation_00_init_warp_pass_permutations.h>
 #include <ffx_frameinterpolation_01_downsample_of_colour_pass_fs_permutations.h>
 #include <ffx_frameinterpolation_10_warp_flow_pass_permutations.h>

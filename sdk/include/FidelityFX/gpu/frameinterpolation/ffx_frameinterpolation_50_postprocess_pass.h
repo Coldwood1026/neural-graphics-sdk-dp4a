@@ -20,7 +20,7 @@ FFX_MIN16_F4 Stable_Softmax(FFX_MIN16_F4 tensor)
     // Subtract the max value to help reduce overflow issues
     FFX_MIN16_F4 stable_ten     = tensor - max4(tensor);
     FFX_MIN16_F4 e_ten          = exp(stable_ten);
-    FFX_MIN16_F  sum            = dot(e_ten, FFX_MIN16_F4(1.0HF));
+    FFX_MIN16_F  sum            = dot(e_ten, FFX_MIN16_F4(1.0HF, 1.0HF, 1.0HF, 1.0HF));
     FFX_MIN16_F4 smax_activated = e_ten / (sum + HALF_MIN);
     return smax_activated;
 }
@@ -33,9 +33,9 @@ void postprocess(int32_t2 output_pixel)
 
     float2 uv = (float2(output_pixel.xy) + 0.5f) * DisplaySizeRcp();
 
-    float2   mvDepthLanef = float2(MvDepthLaneSize());
-    float2   flowLanef    = float2(FlowLaneSize());
-    float2   ofSizef      = float2(GetOpticalFlowResolution());
+    float2   mvDepthLanef = float2(MvDepthLaneSize().x, MvDepthLaneSize().y);
+    float2   flowLanef    = float2(FlowLaneSize().x, FlowLaneSize().y);
+    float2   ofSizef      = float2(GetOpticalFlowResolution().x, GetOpticalFlowResolution().y);
     int32_t2 iMvCoord     = int32_t2(floor(uv * mvDepthLanef));
     int32_t2 iFlowCoord   = int32_t2(floor(uv * flowLanef));
 
@@ -66,7 +66,7 @@ void postprocess(int32_t2 output_pixel)
     params = Stable_Softmax(params);
 
     // Composite Output
-    FFX_MIN16_F3 rgb_t = FFX_MIN16_F3(0.HF);
+    FFX_MIN16_F3 rgb_t = FFX_MIN16_F3(0.HF, 0.HF, 0.HF);
     rgb_t += rgb_m1_warp_t_mv * params.x;
     rgb_t += rgb_p1_warp_t_mv * params.y;
     rgb_t += rgb_m1_warp_t_flow * params.z;

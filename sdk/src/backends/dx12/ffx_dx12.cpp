@@ -22,7 +22,6 @@
 
 #include <FidelityFX/host/ffx_interface.h>
 #include <FidelityFX/host/ffx_util.h>
-#include <FidelityFX/host/ffx_assert.h>
 #include <FidelityFX/host/backends/dx12/ffx_dx12.h>
 #include <FidelityFX/host/backends/dx12/d3dx12.h>
 #include <ffx_shader_blobs.h>
@@ -277,7 +276,26 @@ FFX_API size_t ffxGetScratchMemorySizeDX12(size_t maxContexts)
     uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(maxContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
     uint32_t gpuJobDescArraySize        = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
 
-    return FFX_ALIGN_UP(sizeof(BackendContext_DX12) + resourceArraySize + contextArraySize + stagingRingBufferArraySize + gpuJobDescArraySize, sizeof(uint64_t));
+    /*
+     * Pipeline records.
+     *
+     * Neither of these was in the size calculation before. pDataGraphPipelines was declared
+     * in the backend context, written through by CreateDataGraphPipelineDX12, and never
+     * allocated -- it stayed null, so that write was to address zero. It did not fire
+     * because fpCreateDataGraphPipeline is unreachable in this build: the NFRU and NSS
+     * modules drive their own dp4a hosts directly. It would have fired the moment anything
+     * created a data-graph pipeline through the interface, so it is fixed here rather than
+     * left as a landmine.
+     *
+     * The graphics records are new and are what frame interpolation's fragment passes
+     * need.
+     */
+    uint32_t dataGraphPipelineArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_DX12::DataGraphPipelineDX12), sizeof(uint64_t));
+    uint32_t graphicsPipelineArraySize  = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_DX12::GraphicsPipelineDX12), sizeof(uint64_t));
+
+    return FFX_ALIGN_UP(sizeof(BackendContext_DX12) + resourceArraySize + contextArraySize + stagingRingBufferArraySize + gpuJobDescArraySize
+                            + dataGraphPipelineArraySize + graphicsPipelineArraySize,
+                        sizeof(uint64_t));
 }
 
 // Create a FfxDevice from a ID3D12Device*
@@ -412,6 +430,12 @@ static FfxErrorCode CreateDataGraphPipelineDX12(
         ci.queue    = 0;
         ci.width    = dataGraphWidth;
         ci.height   = dataGraphHeight;
+        /*
+         * Say which API this is. Without it the library falls back to NFRU_DP4A_BACKEND
+         * and then to Vulkan, treats `instance` -- which is the ID3D12Device on purpose,
+         * see the comment above -- as a VkInstance, and dies inside VkCreateDevice.
+         */
+        ci.backend  = NFRU_DP4A_BACKEND_DX12;
 
         NfruDp4aContext* dp4a = nullptr;
         if (nfruDp4aCreateContext(&ci, &dp4a) != NFRU_DP4A_OK)
@@ -557,33 +581,61 @@ static FfxErrorCode executeGpuJobDataGraphDX12(
     return FFX_OK;
 }
 /*
- * Graphics pipelines are not available in this D3D12 backend.
+ * Graphics pipelines.
  *
  * The imported AMD 1.1.3 backend creates only COMPUTE pipeline states -- there is no
  * CreateGraphicsPipelineState call anywhere in it -- and it reached the shader-blob
- * provider with a hardcoded FFX_BIND_COMPUTE_SHADER_STAGE. The Arm fork, meanwhile,
- * split the interface into fpCreateComputePipeline and fpCreateGraphicsPipeline and the
- * Vulkan backend now has genuinely separate CreateComputePipelineVK /
- * CreateGraphicsPipelineVK.
+ * provider with a hardcoded FFX_BIND_COMPUTE_SHADER_STAGE, so it could not have built one.
+ * The Arm fork, meanwhile, split the interface into fpCreateComputePipeline and
+ * fpCreateGraphicsPipeline, and frame interpolation's eight fragment passes need the
+ * second.
  *
- * Pointing fpCreateGraphicsPipeline at CreatePipelineDX12 would therefore quietly hand
- * back a COMPUTE pipeline state for a graphics request. Refusing explicitly is better
- * than a wrong object that fails much later, or worse, does not fail at all.
+ * This shares its body with the compute path (CreatePipelineInternal, defined further
+ * down) because the two differ only in which shader blobs are fetched and in what is built
+ * at the end -- and for graphics, what is built at the end is nothing, until a job runs and
+ * the render-target formats are known. See GraphicsPipelineDX12 in ffx_dx12.h.
  */
+static FfxErrorCode CreatePipelineInternal(
+    FfxInterface*                 backendInterface,
+    FfxEffect                     effect,
+    FfxPass                       pass,
+    uint32_t                      permutationOptions,
+    const FfxPipelineDescription* pipelineDescription,
+    FfxUInt32                     effectContextId,
+    FfxPipelineState*             outPipeline,
+    bool                          graphics);
+
 static FfxErrorCode CreateGraphicsPipelineDX12(
-    FfxInterface*,
-    FfxEffect,
-    FfxPass,
-    uint32_t,
-    const FfxPipelineDescription*,
-    FfxUInt32,
-    FfxPipelineState*)
+    FfxInterface*                 backendInterface,
+    FfxEffect                     effect,
+    FfxPass                       pass,
+    uint32_t                      permutationOptions,
+    const FfxPipelineDescription* pipelineDescription,
+    FfxUInt32                     effectContextId,
+    FfxPipelineState*             outPipeline)
 {
-    FFX_ASSERT_MESSAGE(false,
-                       "The D3D12 backend in this tree is compute-only: the graphics pipeline "
-                       "passes it used to serve depend on HLSL shaders that this fork does not "
-                       "ship (see SDK-INTEGRATION-NOTES.md)");
-    return FFX_ERROR_BACKEND_API_ERROR;
+    return CreatePipelineInternal(backendInterface, effect, pass, permutationOptions, pipelineDescription,
+                                  effectContextId, outPipeline, /*graphics=*/true);
+}
+
+/*
+ * The Arm fork added fpSetMessageCallback to FfxInterface and wired it in ffx_vk.cpp. The
+ * D3D12 backend in this tree came from AMD 1.1.3, which predates that member, so it was
+ * never assigned -- and the frame interpolation component calls it unconditionally during
+ * context creation (ffx_frameinterpolation.cpp, in frameinterpolationCreate). An unassigned
+ * function pointer is not a soft failure: it is an access violation, and it took the
+ * execution harness down before a single pipeline was created.
+ *
+ * The member count made this easy to miss: 28 of the interface's 30 entries were assigned,
+ * and the two that were not were invisible without enumerating them.
+ */
+FfxErrorCode SetupMessageCallbackDX12(FfxInterface* backendInterface, FfxBackendMessage ffxMessageCallback)
+{
+    FFX_ASSERT(NULL != backendInterface);
+
+    backendInterface->fpMessage = ffxMessageCallback;
+
+    return FFX_OK;
 }
 
 // populate interface with DX12 pointers.
@@ -604,6 +656,7 @@ FfxErrorCode ffxGetInterfaceDX12(
     FFX_RETURN_ON_ERROR(
         scratchBufferSize >= ffxGetScratchMemorySizeDX12(maxContexts),
         FFX_ERROR_INSUFFICIENT_MEMORY);
+    backendInterface->fpSetMessageCallback = SetupMessageCallbackDX12;
 
     backendInterface->fpGetSDKVersion = GetSDKVersionDX12;
     backendInterface->fpGetEffectGpuMemoryUsage = GetEffectGpuMemoryUsageDX12;
@@ -1399,6 +1452,25 @@ FfxErrorCode CreateBackendContextDX12(FfxInterface* backendInterface, FfxEffect 
         // Map the effect contexts
         backendContext->pEffectContexts = reinterpret_cast<BackendContext_DX12::EffectContext*>(pMem);
         memset(backendContext->pEffectContexts, 0, contextArraySize);
+        pMem += contextArraySize;
+
+        /*
+         * Map the pipeline records.
+         *
+         * pDataGraphPipelines was previously left null while CreateDataGraphPipelineDX12
+         * wrote through it. ffxGetScratchMemorySizeDX12 now reserves both arrays, and they
+         * are mapped here. The total there is a sum, so order does not affect correctness --
+         * but keeping the two lists in step is what keeps this readable.
+         */
+        uint32_t dataGraphPipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_DX12::DataGraphPipelineDX12), sizeof(uint64_t));
+        backendContext->pDataGraphPipelines = reinterpret_cast<BackendContext_DX12::DataGraphPipelineDX12*>(pMem);
+        memset(backendContext->pDataGraphPipelines, 0, dataGraphPipelineArraySize);
+        pMem += dataGraphPipelineArraySize;
+
+        uint32_t graphicsPipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_DX12::GraphicsPipelineDX12), sizeof(uint64_t));
+        backendContext->pGraphicsPipelines = reinterpret_cast<BackendContext_DX12::GraphicsPipelineDX12*>(pMem);
+        memset(backendContext->pGraphicsPipelines, 0, graphicsPipelineArraySize);
+        pMem += graphicsPipelineArraySize;
 
         // CPUVisible
         D3D12_DESCRIPTOR_HEAP_DESC descHeap;
@@ -1511,6 +1583,34 @@ FfxErrorCode GetDeviceCapabilitiesDX12(FfxInterface* backendInterface, FfxDevice
     FFX_ASSERT(NULL != backendInterface->device);
     FFX_ASSERT(NULL != deviceCapabilities);
     ID3D12Device* dx12Device = reinterpret_cast<ID3D12Device*>(backendInterface->device);
+
+    /*
+     * Zero first, then set the fields this backend knows about.
+     *
+     * FfxDeviceCapabilities carries members the Arm fork added for its tensor and
+     * data-graph paths -- tensorSupported, computeSupportTensor, fragmentSupportTensor,
+     * dataGraphSupported, dataGraphOFSupported, the grid-size sets and the four
+     * dataGraphOF* extents. This function came from AMD 1.1.3 and knows none of them, so
+     * without this the caller's struct keeps whatever happened to be on its stack.
+     *
+     * The frame interpolation component is exactly such a caller: it declares
+     * `FfxDeviceCapabilities capabilities;` uninitialised, derives `inTensorBufferAliased`
+     * from computeSupportTensor / fragmentSupportTensor, and feeds the resulting
+     * FfxResourceFlags into fpCreateResource. Garbage there is how the execution harness
+     * died with STATUS_STACK_BUFFER_OVERRUN before creating a single pipeline -- and it is
+     * the kind of failure that produces no diagnostic at all.
+     *
+     * The Vulkan backend sets every one of these. D3D12 cannot honour any of them: there
+     * are no ARM tensors and no data graph on this API, so false and zero are the correct
+     * values rather than placeholders. The effect then takes its buffer-aliased path, which
+     * this backend does implement.
+     */
+    memset(deviceCapabilities, 0, sizeof(FfxDeviceCapabilities));
+    deviceCapabilities->tensorSupported       = false;
+    deviceCapabilities->computeSupportTensor  = false;
+    deviceCapabilities->fragmentSupportTensor = false;
+    deviceCapabilities->dataGraphSupported    = false;
+    deviceCapabilities->dataGraphOFSupported  = false;
 
     // Check if we have shader model 6.6
     D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_6 };
@@ -1736,7 +1836,22 @@ FfxErrorCode CreateResourceDX12(
          * buffer case.
          */
         dx12ResourceDescription.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        dx12ResourceDescription.Width = createResourceDescription->resourceDescription.shapeSize;
+        /*
+         * The byte size is NOT shapeSize. shapeSize is the RANK of the shape -- the
+         * interpolation effect sets tensorShapeSize = 4, meaning four dimensions -- while
+         * the extent lives in width and height and the innermost dimension in channel.
+         * Using shapeSize as the width produced a four-byte buffer for a tensor that needs
+         * 160*96*16 = 245,760 bytes. The first such call happened to survive and the second
+         * aborted inside CreateCommittedResource, which is what the execution harness
+         * caught: an abort with no diagnostic, because the failing HRESULT is swallowed by
+         * the TIF macro.
+         */
+        dx12ResourceDescription.Width = static_cast<UINT64>(createResourceDescription->resourceDescription.width)
+                                      * createResourceDescription->resourceDescription.height
+                                      * (createResourceDescription->resourceDescription.channel > 0
+                                             ? createResourceDescription->resourceDescription.channel
+                                             : 1u)
+                                      * sizeof(int8_t);
         dx12ResourceDescription.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         break;
 
@@ -2785,14 +2900,32 @@ D3D12_TEXTURE_ADDRESS_MODE FfxGetAddressModeDX12(const FfxAddressMode& addressMo
     }
 }
 
-FfxErrorCode CreatePipelineDX12(
+/*
+ * Shared body of the compute and graphics pipeline creators.
+ *
+ * The two differ in exactly two places, and neither is the root signature: a D3D12 root
+ * signature is stage-agnostic (visibility is ALL), and the binding flattening that fills
+ * outPipeline->*Bindings is identical for both. What differs is
+ *
+ *   1. which blobs are fetched -- a graphics pipeline needs the vertex blob as well as the
+ *      pixel one, and the widened callback carries it in the second out-parameter; and
+ *   2. what is built at the end -- a compute PSO there, and for graphics no PSO at all,
+ *      because a graphics PSO bakes its render-target formats and those are only known
+ *      when the job runs. See GraphicsPipelineDX12 in ffx_dx12.h.
+ *
+ * Duplicating the root signature code to express that would have been ~250 copied lines
+ * whose only job is to stay in step with the original. One function and a flag is smaller,
+ * and there is one place for the two to stay consistent.
+ */
+static FfxErrorCode CreatePipelineInternal(
     FfxInterface* backendInterface,
     FfxEffect effect,
     FfxPass pass,
     uint32_t permutationOptions,
     const FfxPipelineDescription* pipelineDescription,
     FfxUInt32                     effectContextId,
-    FfxPipelineState* outPipeline)
+    FfxPipelineState* outPipeline,
+    bool                          graphics)
 {
     FFX_ASSERT(NULL != backendInterface);
     FFX_ASSERT(NULL != pipelineDescription);
@@ -2800,7 +2933,8 @@ FfxErrorCode CreatePipelineDX12(
     BackendContext_DX12* backendContext = (BackendContext_DX12*)backendInterface->scratchBuffer;
     ID3D12Device* dx12Device = backendContext->device;
 
-    FfxShaderBlob shaderBlob = { };
+    FfxShaderBlob shaderBlob     = { };
+    FfxShaderBlob vertShaderBlob = { };
     /*
      * The Arm fork widened this callback. 1.1.3 was
      * (effect, pass, FfxBindStage bindStage, permutationOptions, outBlob) -- it carried
@@ -2808,12 +2942,17 @@ FfxErrorCode CreatePipelineDX12(
      * blob. The current signature is
      * (effect, pass, permutationOptions, outBlob, outVertBlob, outDataGraphBlob).
      *
-     * No information is lost: this function creates COMPUTE pipelines only (see
-     * CreateGraphicsPipelineDX12), which is exactly what the hardcoded
-     * FFX_BIND_COMPUTE_SHADER_STAGE used to say.
+     * A compute pipeline has no vertex shader, so the compute path asks for nothing in the
+     * second out-parameter -- which is what the hardcoded FFX_BIND_COMPUTE_SHADER_STAGE
+     * used to say. A graphics pipeline needs both halves.
      */
-    backendInterface->fpGetPermutationBlobByIndex(effect, pass, permutationOptions, &shaderBlob, nullptr, nullptr);
+    backendInterface->fpGetPermutationBlobByIndex(effect, pass, permutationOptions, &shaderBlob,
+                                                  graphics ? &vertShaderBlob : nullptr, nullptr);
     FFX_ASSERT(shaderBlob.data && shaderBlob.size);
+    if (graphics)
+    {
+        FFX_ASSERT(vertShaderBlob.data && vertShaderBlob.size);
+    }
 
     int32_t staticTextureSrvCount = 0;
     int32_t staticBufferSrvCount  = 0;
@@ -3314,25 +3453,76 @@ FfxErrorCode CreatePipelineDX12(
     // Todo when needed
     //outPipeline->samplerCount      = shaderBlob.samplerCount;
     //outPipeline->rtAccelStructCount= shaderBlob.rtAccelStructCount;
-        
     // create the PSO
-    D3D12_COMPUTE_PIPELINE_STATE_DESC dx12PipelineStateDescription = {};
-    dx12PipelineStateDescription.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
-    dx12PipelineStateDescription.pRootSignature = dx12RootSignature;
-    dx12PipelineStateDescription.CS.pShaderBytecode = shaderBlob.data;
-    dx12PipelineStateDescription.CS.BytecodeLength = shaderBlob.size;
+    if (graphics)
+    {
+        /*
+         * No PSO here, deliberately.
+         *
+         * A D3D12 graphics pipeline bakes its render-target formats, and this function runs
+         * before any job has been scheduled -- the targets it will write are not known yet.
+         * The Vulkan backend has the same problem and solves it the same way: its
+         * CreateGraphicsPipelineVK builds only the layout, and getOrCreateGraphicsPipeline
+         * creates the PSO from inside the job once the render pass (and so the formats)
+         * exist.
+         *
+         * So the blobs are parked in a record, whose address goes into outPipeline->
+         * rootSignature -- the same recovery route DataGraphPipelineDX12 uses -- and
+         * executeGpuJobFragmentDX12 builds and caches the PSO on first execution.
+         */
+        FFX_ASSERT_MESSAGE(backendContext->nextGraphicsPipeline < backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT,
+                           "FFXInterface: DX12: ran out of graphics pipeline records. Please increase FFX_MAX_PASS_COUNT");
 
-    if (FAILED(dx12Device->CreateComputePipelineState(&dx12PipelineStateDescription, IID_PPV_ARGS(reinterpret_cast<ID3D12PipelineState**>(&outPipeline->pipeline)))))
-        return FFX_ERROR_BACKEND_API_ERROR;
+        BackendContext_DX12::GraphicsPipelineDX12* pRecord =
+            &backendContext->pGraphicsPipelines[backendContext->nextGraphicsPipeline++];
 
-    // Set the pipeline name
-    { wchar_t ffxWideName[FFX_RESOURCE_NAME_SIZE];
-    ffxNarrowToWide(ffxWideName, std::size(ffxWideName), pipelineDescription->name);
-    reinterpret_cast<ID3D12PipelineState*>(outPipeline->pipeline)->SetName(ffxWideName); }
+        pRecord->vertBlob         = vertShaderBlob.data;
+        pRecord->vertBlobSize     = vertShaderBlob.size;
+        pRecord->pixelBlob        = shaderBlob.data;
+        pRecord->pixelBlobSize    = shaderBlob.size;
+        pRecord->effectContextId  = effectContextId;
+        pRecord->rootSignature    = dx12RootSignature;
+        pRecord->cachedPso        = nullptr;
+        pRecord->cachedFormatHash = 0;
+        pRecord->hasCachedPso     = false;
+
+        outPipeline->rootSignature = reinterpret_cast<FfxRootSignature>(pRecord);
+        outPipeline->pipeline      = nullptr;
+    }
+    else
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC dx12PipelineStateDescription = {};
+        dx12PipelineStateDescription.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+        dx12PipelineStateDescription.pRootSignature = dx12RootSignature;
+        dx12PipelineStateDescription.CS.pShaderBytecode = shaderBlob.data;
+        dx12PipelineStateDescription.CS.BytecodeLength = shaderBlob.size;
+
+        if (FAILED(dx12Device->CreateComputePipelineState(&dx12PipelineStateDescription, IID_PPV_ARGS(reinterpret_cast<ID3D12PipelineState**>(&outPipeline->pipeline)))))
+            return FFX_ERROR_BACKEND_API_ERROR;
+
+        // Set the pipeline name
+        { wchar_t ffxWideName[FFX_RESOURCE_NAME_SIZE];
+        ffxNarrowToWide(ffxWideName, std::size(ffxWideName), pipelineDescription->name);
+        reinterpret_cast<ID3D12PipelineState*>(outPipeline->pipeline)->SetName(ffxWideName); }
+    }
+
     strncpy(outPipeline->name, pipelineDescription->name, FFX_RESOURCE_NAME_SIZE - 1);
     outPipeline->name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
 
     return FFX_OK;
+}
+
+FfxErrorCode CreatePipelineDX12(
+    FfxInterface* backendInterface,
+    FfxEffect effect,
+    FfxPass pass,
+    uint32_t permutationOptions,
+    const FfxPipelineDescription* pipelineDescription,
+    FfxUInt32                     effectContextId,
+    FfxPipelineState* outPipeline)
+{
+    return CreatePipelineInternal(backendInterface, effect, pass, permutationOptions, pipelineDescription,
+                                  effectContextId, outPipeline, /*graphics=*/false);
 }
 
 FfxErrorCode DestroyPipelineDX12(
@@ -3343,6 +3533,98 @@ FfxErrorCode DestroyPipelineDX12(
     FFX_ASSERT(backendInterface != nullptr);
     if (!pipeline) {
         return FFX_OK;
+    }
+
+    BackendContext_DX12* backendContext = (BackendContext_DX12*)backendInterface->scratchBuffer;
+
+    /*
+     * Two kinds of pipeline do not put an ID3D12RootSignature in
+     * FfxPipelineState::rootSignature. Both put the address of a backend-side record there
+     * instead, because neither can be represented by a D3D12 pipeline object at all:
+     *
+     *   - Graphics pipelines, because a graphics PSO cannot be built until a job supplies
+     *     render targets, so something has to outlive the create call.
+     *   - Data-graph pipelines, which have no ID3D12PipelineState in any form: the dp4a
+     *     host owns its own pipelines, root signature and barriers and records them
+     *     itself.
+     *
+     * That field is therefore NOT a COM pointer for either kind, and releasing it is an
+     * access violation.
+     *
+     * This is not hypothetical. The frame interpolation component releases a pipeline
+     * before every create (ffxSafeReleasePipeline at the top of its CreatePipeline lambda
+     * in ffx_frameinterpolation.cpp). The graphics case is what the execution harness hit
+     * first. The data-graph case is reached on the next createPipelineStates, because by
+     * then the NFRU pipeline is holding a data-graph record.
+     *
+     * Each record is identified by its address lying inside the array the backend reserved
+     * for it, which is exact rather than a guess about which fields are null.
+     */
+    {
+        const uintptr_t rootSig = reinterpret_cast<uintptr_t>(pipeline->rootSignature);
+
+        const uintptr_t gfxBegin = reinterpret_cast<uintptr_t>(backendContext->pGraphicsPipelines);
+        const uintptr_t gfxEnd   = gfxBegin + static_cast<uintptr_t>(backendContext->maxEffectContexts) * FFX_MAX_PASS_COUNT
+                                               * sizeof(BackendContext_DX12::GraphicsPipelineDX12);
+
+        if (backendContext->pGraphicsPipelines != nullptr && rootSig >= gfxBegin && rootSig < gfxEnd)
+        {
+            BackendContext_DX12::GraphicsPipelineDX12* pRecord =
+                reinterpret_cast<BackendContext_DX12::GraphicsPipelineDX12*>(pipeline->rootSignature);
+
+            if (pRecord->cachedPso != nullptr)
+            {
+                pRecord->cachedPso->Release();
+                pRecord->cachedPso = nullptr;
+            }
+            if (pRecord->rootSignature != nullptr)
+            {
+                pRecord->rootSignature->Release();
+                pRecord->rootSignature = nullptr;
+            }
+            pRecord->hasCachedPso     = false;
+            pRecord->cachedFormatHash = 0;
+
+            pipeline->rootSignature = nullptr;
+            pipeline->pipeline      = nullptr;
+            return FFX_OK;
+        }
+
+        const uintptr_t dgBegin = reinterpret_cast<uintptr_t>(backendContext->pDataGraphPipelines);
+        const uintptr_t dgEnd   = dgBegin + static_cast<uintptr_t>(backendContext->maxEffectContexts) * FFX_MAX_PASS_COUNT
+                                              * sizeof(BackendContext_DX12::DataGraphPipelineDX12);
+
+        if (backendContext->pDataGraphPipelines != nullptr && rootSig >= dgBegin && rootSig < dgEnd)
+        {
+            BackendContext_DX12::DataGraphPipelineDX12* pRecord =
+                reinterpret_cast<BackendContext_DX12::DataGraphPipelineDX12*>(pipeline->rootSignature);
+
+            /*
+             * dp4a is a void* holding one of two unrelated types, discriminated by the
+             * entry point the effect asked for. Releasing it here is not optional: nothing
+             * else in this backend calls either destructor, so every data-graph pipeline
+             * created would otherwise leak its device, weights and scratch memory.
+             */
+            if (pRecord->dp4a != nullptr)
+            {
+                if (strcmp(pRecord->entryPoint, "nfru_v1_int8") == 0)
+                {
+                    nfruDp4aDestroyContext(reinterpret_cast<NfruDp4aContext*>(pRecord->dp4a));
+                }
+                else
+                {
+                    NssDx12Destroy(reinterpret_cast<NssDx12*>(pRecord->dp4a));
+                }
+                pRecord->dp4a = nullptr;
+            }
+            pRecord->entryPoint[0] = '\0';
+            pRecord->width         = 0;
+            pRecord->height        = 0;
+
+            pipeline->rootSignature = nullptr;
+            pipeline->pipeline      = nullptr;
+            return FFX_OK;
+        }
     }
 
     // destroy Rootsignature
@@ -3723,6 +4005,338 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_DX12*       backendConte
     return FFX_OK;
 }
 
+/*
+ * =============================================================================
+ * Fragment jobs -- the D3D12 half of executeGpuJobFragment in ffx_vk.cpp.
+ * =============================================================================
+ * Frame interpolation's eight fragment passes each draw one full-screen triangle into a
+ * set of render targets. The Vulkan backend handles them with a render pass built from the
+ * job's render targets and a PSO created lazily inside getOrCreateGraphicsPipeline; the
+ * structure here is the same, for the same reason -- a D3D12 graphics PSO bakes its
+ * render-target formats, and those only exist once the job runs.
+ */
+static FfxErrorCode executeGpuJobFragmentDX12(BackendContext_DX12*       backendContext,
+                                              FfxGpuJobDescription*      job,
+                                              ID3D12GraphicsCommandList* dx12CommandList,
+                                              FfxUInt32                  effectContextId)
+{
+    ID3D12Device* dx12Device = backendContext->device;
+
+    FfxPipelineState& pipeline = job->fragmentJobDescriptor.pipeline;
+
+    BackendContext_DX12::GraphicsPipelineDX12* pRecord =
+        reinterpret_cast<BackendContext_DX12::GraphicsPipelineDX12*>(pipeline.rootSignature);
+    if (pRecord == nullptr)
+    {
+        FFX_ASSERT_MESSAGE(false, "FFXInterface: DX12: fragment job with no graphics pipeline record");
+        return FFX_ERROR_INVALID_ARGUMENT;
+    }
+
+    // -------------------------------------------------------------------------
+    // Gather the render targets.
+    //
+    // The count and the formats come from the bound resources rather than from
+    // pipeline.rtCount. They have to: a D3D12 graphics PSO bakes RTVFormats, and the
+    // shader compiler's reflection cannot supply them here -- this fork's FfxShaderBlob
+    // carries rtTexture* members that only its own (GLSL-only) compiler ever emitted, so
+    // the accessor fills them with zero. Reading the resources is both available and
+    // exact, which is what the Vulkan render pass does too.
+    // -------------------------------------------------------------------------
+    uint32_t                  rtCount   = 0;
+    DXGI_FORMAT               rtFormats[FFX_MAX_NUM_RTS] = {};
+    ID3D12Resource*           rtResources[FFX_MAX_NUM_RTS] = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE rtHandles[FFX_MAX_NUM_RTS] = {};
+
+    for (uint32_t rt = 0; rt < FFX_MAX_NUM_RTS; ++rt)
+    {
+        const uint32_t internalIndex = job->fragmentJobDescriptor.rtTextures[rt].resource.internalIndex;
+        if (internalIndex == 0)
+        {
+            break;
+        }
+        ID3D12Resource* pResource = getDX12ResourcePtr(backendContext, internalIndex);
+        if (pResource == nullptr)
+        {
+            break;
+        }
+        rtResources[rt] = pResource;
+        rtFormats[rt]   = pResource->GetDesc().Format;
+        rtCount++;
+    }
+
+    if (rtCount == 0)
+    {
+        FFX_ASSERT_MESSAGE(false, "FFXInterface: DX12: fragment job with no render targets");
+        return FFX_ERROR_INVALID_ARGUMENT;
+    }
+
+    // Hash the format set so a PSO built for one set is not reused for another. The
+    // Vulkan backend keys its cached pipeline on the render pass handle for the same
+    // reason.
+    uint64_t formatHash = 1469598103934665603ull;  // FNV-1a
+    for (uint32_t rt = 0; rt < rtCount; ++rt)
+    {
+        formatHash = (formatHash ^ static_cast<uint64_t>(rtFormats[rt])) * 1099511628211ull;
+    }
+    formatHash = (formatHash ^ static_cast<uint64_t>(rtCount)) * 1099511628211ull;
+
+    // -------------------------------------------------------------------------
+    // Build the PSO on first use, or when the format set changes.
+    // -------------------------------------------------------------------------
+    if (!pRecord->hasCachedPso || pRecord->cachedFormatHash != formatHash)
+    {
+        if (pRecord->cachedPso != nullptr)
+        {
+            pRecord->cachedPso->Release();
+            pRecord->cachedPso = nullptr;
+        }
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature        = pRecord->rootSignature;
+        psoDesc.VS.pShaderBytecode    = pRecord->vertBlob;
+        psoDesc.VS.BytecodeLength     = pRecord->vertBlobSize;
+        psoDesc.PS.pShaderBytecode    = pRecord->pixelBlob;
+        psoDesc.PS.BytecodeLength     = pRecord->pixelBlobSize;
+
+        // No vertex input, no stream output, no tessellation: the vertex shader builds a
+        // full-screen triangle from SV_VertexID, which is what the Vulkan backend does
+        // too (vkCmdDraw(vkCommandBuffer, 3, 1, 0, 0) with no vertex bindings).
+        psoDesc.InputLayout           = {nullptr, 0};
+        psoDesc.IBStripCutValue       = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        psoDesc.StreamOutput          = {};
+
+        // Rasteriser: solid fill, back-face cull, clockwise front face -- verbatim the
+        // Vulkan settings (VK_POLYGON_MODE_FILL, VK_CULL_MODE_BACK_BIT,
+        // VK_FRONT_FACE_CLOCKWISE).
+        psoDesc.RasterizerState.FillMode              = D3D12_FILL_MODE_SOLID;
+        psoDesc.RasterizerState.CullMode              = D3D12_CULL_MODE_BACK;
+        psoDesc.RasterizerState.FrontCounterClockwise = FALSE;
+        psoDesc.RasterizerState.DepthBias             = D3D12_DEFAULT_DEPTH_BIAS;
+        psoDesc.RasterizerState.DepthBiasClamp        = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+        psoDesc.RasterizerState.SlopeScaledDepthBias  = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+        psoDesc.RasterizerState.DepthClipEnable       = TRUE;
+        psoDesc.RasterizerState.MultisampleEnable     = FALSE;
+        psoDesc.RasterizerState.AntialiasedLineEnable = FALSE;
+        psoDesc.RasterizerState.ForcedSampleCount     = 0;
+        psoDesc.RasterizerState.ConservativeRaster    = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+        // Blend disabled with a full write mask on every target, matching the Vulkan
+        // color blend attachments (blendEnable = VK_FALSE, all four components written).
+        psoDesc.BlendState.AlphaToCoverageEnable  = FALSE;
+        psoDesc.BlendState.IndependentBlendEnable = FALSE;
+        for (uint32_t rt = 0; rt < FFX_MAX_NUM_RTS; ++rt)
+        {
+            psoDesc.BlendState.RenderTarget[rt].BlendEnable           = FALSE;
+            psoDesc.BlendState.RenderTarget[rt].LogicOpEnable         = FALSE;
+            psoDesc.BlendState.RenderTarget[rt].SrcBlend              = D3D12_BLEND_ONE;
+            psoDesc.BlendState.RenderTarget[rt].DestBlend             = D3D12_BLEND_ZERO;
+            psoDesc.BlendState.RenderTarget[rt].BlendOp               = D3D12_BLEND_OP_ADD;
+            psoDesc.BlendState.RenderTarget[rt].SrcBlendAlpha         = D3D12_BLEND_ONE;
+            psoDesc.BlendState.RenderTarget[rt].DestBlendAlpha        = D3D12_BLEND_ZERO;
+            psoDesc.BlendState.RenderTarget[rt].BlendOpAlpha          = D3D12_BLEND_OP_ADD;
+            psoDesc.BlendState.RenderTarget[rt].LogicOp               = D3D12_LOGIC_OP_NOOP;
+            psoDesc.BlendState.RenderTarget[rt].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        }
+
+        // No depth or stencil: the Vulkan render pass has a single colour attachment and
+        // no depth attachment.
+        psoDesc.DepthStencilState.DepthEnable    = FALSE;
+        psoDesc.DepthStencilState.StencilEnable  = FALSE;
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        psoDesc.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_ALWAYS;
+
+        psoDesc.SampleMask            = UINT_MAX;
+        psoDesc.NodeMask              = 0;
+        psoDesc.Flags                 = D3D12_PIPELINE_STATE_FLAG_NONE;
+        psoDesc.SampleDesc.Count      = 1;
+        psoDesc.SampleDesc.Quality    = 0;
+        psoDesc.DSVFormat             = DXGI_FORMAT_UNKNOWN;
+        psoDesc.NumRenderTargets      = rtCount;
+        for (uint32_t rt = 0; rt < rtCount; ++rt)
+        {
+            psoDesc.RTVFormats[rt] = rtFormats[rt];
+        }
+
+        if (FAILED(dx12Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pRecord->cachedPso))))
+        {
+            FFX_ASSERT_MESSAGE(false, "FFXInterface: DX12: CreateGraphicsPipelineState failed "
+                                      "(the render-target formats the job bound may not be supported "
+                                      "as RTVs by this device)");
+            return FFX_ERROR_BACKEND_API_ERROR;
+        }
+        pRecord->cachedFormatHash = formatHash;
+        pRecord->hasCachedPso     = true;
+    }
+
+    // -------------------------------------------------------------------------
+    // Bind. The order here MUST match the root signature parameter order built in
+    // CreatePipelineInternal -- UAV table, SRV table, static tables, then root CBVs --
+    // which is the same order the compute path uses.
+    // -------------------------------------------------------------------------
+    ID3D12DescriptorHeap* dx12DescriptorHeap = backendContext->descRingBuffer;
+    dx12CommandList->SetGraphicsRootSignature(pRecord->rootSignature);
+    dx12CommandList->SetDescriptorHeaps(1, &dx12DescriptorHeap);
+
+    uint32_t descriptorTableIndex = 0;
+
+    const uint32_t maximumUavIndex = pipeline.uavTextureCount + pipeline.uavBufferCount;
+    if (maximumUavIndex > 0)
+    {
+        if (backendContext->descRingBufferBase + maximumUavIndex + 1 > FFX_RING_BUFFER_DESCRIPTOR_COUNT * backendContext->maxEffectContexts)
+        {
+            backendContext->descRingBufferBase = 0;
+        }
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuView = dx12DescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+        gpuView.ptr += backendContext->descRingBufferBase * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        for (uint32_t i = 0; i < pipeline.uavTextureCount; ++i)
+        {
+            if (job->fragmentJobDescriptor.uavTextures[i].resource.internalIndex == 0)
+            {
+                continue;
+            }
+            addBarrier(backendContext, &job->fragmentJobDescriptor.uavTextures[i].resource, FFX_RESOURCE_STATE_PIXEL_UAV);
+
+            const FfxResourceBinding binding    = pipeline.uavTextureBindings[i];
+            const uint32_t           resIndex   = job->fragmentJobDescriptor.uavTextures[i].resource.internalIndex;
+            const uint32_t           uavIndex   = backendContext->pResources[resIndex].uavDescIndex + job->fragmentJobDescriptor.uavTextures[i].mip;
+            const uint32_t           dstIndex   = binding.slotIndex + binding.arrayIndex;
+
+            D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = backendContext->descHeapUavCpu->GetCPUDescriptorHandleForHeapStart();
+            srcHandle.ptr += uavIndex * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuView = dx12DescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+            cpuView.ptr += backendContext->descRingBufferBase * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            cpuView.ptr += dstIndex * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+            dx12Device->CopyDescriptorsSimple(1, cpuView, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        }
+
+        backendContext->descRingBufferBase += maximumUavIndex + 1;
+        dx12CommandList->SetGraphicsRootDescriptorTable(descriptorTableIndex++, gpuView);
+    }
+
+    const uint32_t maximumSrvIndex = pipeline.srvTextureCount + pipeline.srvBufferCount;
+    if (maximumSrvIndex > 0)
+    {
+        if (backendContext->descRingBufferBase + maximumSrvIndex + 1 > FFX_RING_BUFFER_DESCRIPTOR_COUNT * backendContext->maxEffectContexts)
+        {
+            backendContext->descRingBufferBase = 0;
+        }
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuView = dx12DescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+        gpuView.ptr += backendContext->descRingBufferBase * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        for (uint32_t i = 0; i < pipeline.srvTextureCount; ++i)
+        {
+            if (job->fragmentJobDescriptor.srvTextures[i].resource.internalIndex == 0)
+            {
+                continue;
+            }
+            addBarrier(backendContext, &job->fragmentJobDescriptor.srvTextures[i].resource, FFX_RESOURCE_STATE_PIXEL_READ);
+
+            const FfxResourceBinding binding  = pipeline.srvTextureBindings[i];
+            const uint32_t           resIndex = job->fragmentJobDescriptor.srvTextures[i].resource.internalIndex;
+            const uint32_t           dstIndex = binding.slotIndex + binding.arrayIndex;
+
+            D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = backendContext->descHeapSrvCpu->GetCPUDescriptorHandleForHeapStart();
+            srcHandle.ptr += resIndex * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuView = dx12DescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+            cpuView.ptr += backendContext->descRingBufferBase * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            cpuView.ptr += dstIndex * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+            dx12Device->CopyDescriptorsSimple(1, cpuView, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        }
+
+        backendContext->descRingBufferBase += maximumSrvIndex + 1;
+        dx12CommandList->SetGraphicsRootDescriptorTable(descriptorTableIndex++, gpuView);
+    }
+
+    BackendContext_DX12::EffectContext& effectContext = backendContext->pEffectContexts[effectContextId];
+
+    if (pipeline.staticTextureSrvCount > 0)
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuView = dx12DescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+        gpuView.ptr += effectContext.bindlessTextureSrvHeapStart * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        dx12CommandList->SetGraphicsRootDescriptorTable(descriptorTableIndex++, gpuView);
+    }
+    if (pipeline.staticBufferSrvCount > 0)
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuView = dx12DescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+        gpuView.ptr += effectContext.bindlessBufferSrvHeapStart * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        dx12CommandList->SetGraphicsRootDescriptorTable(descriptorTableIndex++, gpuView);
+    }
+    if (pipeline.staticTextureUavCount > 0)
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuView = dx12DescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+        gpuView.ptr += effectContext.bindlessTextureUavHeapStart * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        dx12CommandList->SetGraphicsRootDescriptorTable(descriptorTableIndex++, gpuView);
+    }
+    if (pipeline.staticBufferUavCount > 0)
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuView = dx12DescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+        gpuView.ptr += effectContext.bindlessBufferUavHeapStart * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        dx12CommandList->SetGraphicsRootDescriptorTable(descriptorTableIndex++, gpuView);
+    }
+
+    // Render targets, and the barrier that makes them writable.
+    for (uint32_t rt = 0; rt < rtCount; ++rt)
+    {
+        addBarrier(backendContext, &job->fragmentJobDescriptor.rtTextures[rt].resource, FFX_RESOURCE_STATE_RENDER_TARGET);
+    }
+    flushBarriers(backendContext, dx12CommandList);
+
+    // Build an RTV per target. The heap is shared and small, so this takes the next
+    // descriptor rather than trying to cache one per resource.
+    for (uint32_t rt = 0; rt < rtCount; ++rt)
+    {
+        rtHandles[rt] = backendContext->descHeapRtvCpu->GetCPUDescriptorHandleForHeapStart();
+        rtHandles[rt].ptr += backendContext->nextRtvDescriptor * dx12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        backendContext->nextRtvDescriptor = (backendContext->nextRtvDescriptor + 1) % (FFX_MAX_NUM_RTS * 64);
+
+        D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+        rtvDesc.Format        = rtFormats[rt];
+        rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        dx12Device->CreateRenderTargetView(rtResources[rt], &rtvDesc, rtHandles[rt]);
+    }
+    dx12CommandList->OMSetRenderTargets(rtCount, rtHandles, FALSE, nullptr);
+
+    // Full-screen triangle, one draw, no vertex buffer -- as on Vulkan.
+    const D3D12_VIEWPORT viewport = {0.0f, 0.0f, static_cast<float>(job->fragmentJobDescriptor.viewport[0]),
+                                     static_cast<float>(job->fragmentJobDescriptor.viewport[1]), 0.0f, 1.0f};
+    dx12CommandList->RSSetViewports(1, &viewport);
+    const D3D12_RECT scissor = {0, 0, static_cast<LONG>(job->fragmentJobDescriptor.viewport[0]),
+                                static_cast<LONG>(job->fragmentJobDescriptor.viewport[1])};
+    dx12CommandList->RSSetScissorRects(1, &scissor);
+
+    dx12CommandList->SetPipelineState(pRecord->cachedPso);
+
+    for (uint32_t cb = 0; cb < pipeline.constCount; ++cb)
+    {
+        FfxConstantAllocation allocation;
+        if (s_fpConstantAllocator)
+        {
+            allocation = s_fpConstantAllocator(job->fragmentJobDescriptor.cbs[cb].data,
+                                               job->fragmentJobDescriptor.cbs[cb].num32BitEntries * sizeof(uint32_t));
+        }
+        else
+        {
+            allocation = backendContext->FallbackConstantAllocator(job->fragmentJobDescriptor.cbs[cb].data,
+                                                                   job->fragmentJobDescriptor.cbs[cb].num32BitEntries * sizeof(uint32_t));
+        }
+        dx12CommandList->SetGraphicsRootConstantBufferView(descriptorTableIndex + cb, D3D12_GPU_VIRTUAL_ADDRESS(allocation.handle));
+    }
+
+    dx12CommandList->DrawInstanced(3, 1, 0, 0);
+
+    // Unbind so a later compute dispatch cannot be affected by these targets still being
+    // bound.
+    dx12CommandList->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+
+    return FFX_OK;
+}
+
 static FfxErrorCode executeGpuJobCopy(BackendContext_DX12* backendContext, FfxGpuJobDescription* job, ID3D12GraphicsCommandList* dx12CommandList)
 {
     ID3D12Device* dx12Device = reinterpret_cast<ID3D12Device*>(backendContext->device);
@@ -3891,6 +4505,10 @@ FfxErrorCode ExecuteGpuJobsDX12(
 
             case FFX_GPU_JOB_DATA_GRAPH:
                 errorCode = executeGpuJobDataGraphDX12(backendContext, GpuJob, dx12CommandList);
+                break;
+
+            case FFX_GPU_JOB_FRAGMENT:
+                errorCode = executeGpuJobFragmentDX12(backendContext, GpuJob, dx12CommandList, effectContextId);
                 break;
 
             default:

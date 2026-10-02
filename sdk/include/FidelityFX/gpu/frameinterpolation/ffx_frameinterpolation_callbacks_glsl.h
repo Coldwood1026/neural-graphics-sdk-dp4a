@@ -22,6 +22,83 @@
 //
 // SPDX-FileCopyrightText: Copyright 2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
 // SPDX-License-Identifier: MIT
+//
+// =============================================================================
+// LANGUAGE DISPATCHER -- READ BEFORE EDITING THE BODY BELOW.
+// =============================================================================
+//
+// Arm's shared algorithm headers (ffx_frameinterpolation_common.h,
+// fill_holes_common.h, warp_flow_common.h, quant.h and the per-pass headers) reach
+// their API-specific layer with one hard-coded, language-specific include:
+//
+//     #include "ffx_frameinterpolation_callbacks_glsl.h"
+//
+// AMD never had to solve this: its GLSL and HLSL halves are two separate sets of
+// headers, so its shared GLSL headers include AMD's GLSL callbacks and its shared
+// HLSL headers include AMD's HLSL callbacks. Arm merged the shared headers into one
+// set that serves both backends, so the include above has to resolve to whichever
+// callbacks header matches the language being compiled.
+//
+// Selecting it here is the only place that can work. The alternatives were tried
+// and do not:
+//
+//   * A same-named bridge file in the D3D12 shader directory, made to win by
+//     include-path order. It cannot win: dxc resolves a quoted include that carries
+//     a directory component ("frameinterpolation/...") against the -I roots in list
+//     order, and sdk/src/backends/dx12/CMakeShadersArmFrameinterpolation.txt puts
+//     FFX_GPU_PATH ahead of the shader root because that is how AMD's own lists do
+//     it. Verified by dumping the dependency list: with shaders/ first on the
+//     command line, the GPU-root copy still resolved.
+//
+//   * Replacing this file in the GPU include tree. That tree is shared with the
+//     Vulkan backend, so it would have replaced the real GLSL callbacks for Vulkan
+//     too.
+//
+// So the dispatcher lives inside the file both backends already include. It is
+// inert for GLSL: FFX_HLSL is defined only by the D3D12 shader list
+// (sdk/src/backends/dx12/CMakeShadersArmFrameinterpolation.txt passes
+// -DFFX_HLSL=1), while the Vulkan list passes -DFFX_GLSL=1, so the GLSL body below
+// compiles exactly as it did before this block existed.
+//
+// The GLSL body that follows is unchanged from the fork's original file.
+// =============================================================================
+
+#if defined(FFX_HLSL)
+#include "ffx_frameinterpolation_callbacks_hlsl.h"
+// The GLSL callbacks header pulls in the shared algorithm common header at the same
+// point in its own body (it includes ffx_frameinterpolation_common.h after
+// ffx_core.h), and the shared per-pass headers rely on that having happened before
+// they are reached -- ffx_frameinterpolation_10_warp_flow_pass.h calls
+// IsOnScreen() and InvertAndNormalizeDepth(), both of which live in common. HLSL's
+// single-pass include model means "reached later" is not good enough, so the HLSL
+// branch includes it here, ahead of any per-pass header.
+#include "ffx_frameinterpolation_common.h"
+#else
+// -- GLSL body follows, byte-for-byte the fork's original. --
+// This file is part of the FidelityFX SDK.
+//
+// Copyright (C) 2024 Advanced Micro Devices, Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files(the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions :
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+// SPDX-FileCopyrightText: Copyright 2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
+// SPDX-License-Identifier: MIT
 
 #include "ffx_frameinterpolation_resources.h"
 
@@ -834,3 +911,4 @@ void StoreOutParamsTensor(FFX_PARAMETER_IN FfxInt32x2 iPxPos, FFX_PARAMETER_IN F
 #endif  //!FFX_ARM_FRAMEINTERPOLATION_OPTION_ENABLE_DATA_GRAPH_FI
 
 #endif  // #if defined(FFX_GPU)
+#endif  // #if defined(FFX_HLSL)

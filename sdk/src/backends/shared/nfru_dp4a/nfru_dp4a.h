@@ -116,6 +116,13 @@ typedef struct NfruDp4aDeviceCaps {
     char     deviceName[256];
 } NfruDp4aDeviceCaps;
 
+/* ------------------------------------------------------------------ backend select */
+typedef enum NfruDp4aBackend {
+    NFRU_DP4A_BACKEND_AUTO   = 0,  /* env NFRU_DP4A_BACKEND, else Vulkan */
+    NFRU_DP4A_BACKEND_VULKAN = 1,
+    NFRU_DP4A_BACKEND_DX12   = 2
+} NfruDp4aBackend;
+
 /* ------------------------------------------------------------------ create info */
 typedef struct NfruDp4aCreateInfo {
     /* Vulkan: VkInstance / VkPhysicalDevice / VkDevice / VkQueue.
@@ -140,6 +147,23 @@ typedef struct NfruDp4aCreateInfo {
     /* Host Vulkan loader entry point (PFN_vkGetInstanceProcAddr). NULL means the
      * library loads vulkan-1.dll itself. Ignored by the DX12 backend. */
     void *vkGetInstanceProcAddr;
+
+    /*
+     * Which API the caller handed over. An SDK backend MUST set this: it knows whether
+     * `instance` is a VkInstance or an ID3D12Device, and the library cannot tell.
+     *
+     * NFRU_DP4A_BACKEND_AUTO keeps the historical behaviour -- the NFRU_DP4A_BACKEND
+     * environment variable, and Vulkan when that is unset -- so the standalone
+     * regression harness, which selects the API that way, is unaffected.
+     *
+     * This field exists because the default was a real failure. The DX12 backend of the
+     * frame-interpolation effect left it AUTO, the environment variable was unset, the
+     * library chose Vulkan, and it called VkCreateDevice with an ID3D12Device* in the
+     * VkInstance slot. The Vulkan loader reported "vkGetInstanceProcAddr: Invalid
+     * instance" and the process died on the following indirect call -- with no
+     * indication that the API choice was the problem.
+     */
+    uint32_t backend;
 
     void (*logCallback)(int level, const char *msg, void *userData);
     void *logUserData;

@@ -143,6 +143,47 @@ typedef struct BackendContext_DX12 {
     DataGraphPipelineDX12*      pDataGraphPipelines;
     uint32_t                    nextDataGraphPipeline;
 
+    /*
+     * Graphics pipelines.
+     *
+     * Frame interpolation's fragment passes need a D3D12 graphics pipeline, which the
+     * imported 1.1.3 backend never built -- it was compute-only, and it reached the
+     * shader-blob provider with a hardcoded compute stage.
+     *
+     * This follows the DataGraphPipelineDX12 record above: one entry per pipeline, its
+     * address stored in FfxPipelineState::rootSignature and recovered when the job runs.
+     *
+     * The PSO itself is deliberately NOT created in CreateGraphicsPipelineDX12. A D3D12
+     * graphics pipeline bakes its render-target formats, and those are only known when the
+     * job executes and the real targets are bound -- which is precisely how the Vulkan
+     * backend is arranged: CreateGraphicsPipelineVK builds the layout, and
+     * getOrCreateGraphicsPipeline builds the PSO from inside the job. The shader blobs are
+     * kept here so the PSO can be built on first use and cached against the format set it
+     * was built for.
+     */
+    typedef struct GraphicsPipelineDX12 {
+        const uint8_t*       vertBlob;            ///< vertex DXIL, owned by the permutation header
+        uint32_t             vertBlobSize;
+        const uint8_t*       pixelBlob;           ///< pixel DXIL, likewise
+        uint32_t             pixelBlobSize;
+        uint32_t             effectContextId;
+        ID3D12RootSignature* rootSignature;       ///< built at pipeline creation; see below
+        ID3D12PipelineState* cachedPso;           ///< built on first execution
+        uint64_t             cachedFormatHash;    ///< the RT format set cachedPso is valid for
+        bool                 hasCachedPso;
+
+        /*
+         * rootSignature lives here rather than in FfxPipelineState::rootSignature because
+         * that field is what carries this record's address -- the same recovery route
+         * DataGraphPipelineDX12 uses. The root signature itself is stage-agnostic, so it is
+         * built eagerly at pipeline creation, exactly as the compute path builds it; only
+         * the PSO waits for a job.
+         */
+    } GraphicsPipelineDX12;
+
+    GraphicsPipelineDX12*       pGraphicsPipelines;
+    uint32_t                    nextGraphicsPipeline;
+
     // Allocation defaults
     FfxConstantAllocation       FallbackConstantAllocator(void* data, FfxUInt64 dataSize);
     void*                       constantBufferMem;
