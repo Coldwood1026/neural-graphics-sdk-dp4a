@@ -20,26 +20,31 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#pragma once
+#define FFX_OPTICALFLOW_BIND_SRV_INPUT_COLOR           0
+#define FFX_OPTICALFLOW_BIND_UAV_OPTICAL_FLOW_INPUT          0
 
-#include "../ffx_shader_blobs.h"
-#include <FidelityFX/host/ffx_opticalflow.h>
-#include <stdint.h>
+#define FFX_OPTICALFLOW_BIND_CB_COMMON                       0
 
-#if defined(__cplusplus)
-extern "C" {
-#endif // #if defined(__cplusplus)
+#include "opticalflow/ffx_opticalflow_callbacks_hlsl.h"
 
-// Get a DX12 shader blob for the specified pass and permutation index.
-FfxErrorCode opticalflowGetPermutationBlobByIndex(
-    FfxOpticalflowPass passId,
-    uint32_t permutationOptions,
-    FfxShaderBlob* outBlob,
-    FfxShaderBlob* outVertBlob);
+#ifndef FFX_OPTICALFLOW_THREAD_GROUP_WIDTH
+#define FFX_OPTICALFLOW_THREAD_GROUP_WIDTH 16
+#endif
+#ifndef FFX_OPTICALFLOW_THREAD_GROUP_HEIGHT
+#define FFX_OPTICALFLOW_THREAD_GROUP_HEIGHT 16
+#endif
+#ifndef FFX_OPTICALFLOW_THREAD_GROUP_DEPTH
+#define FFX_OPTICALFLOW_THREAD_GROUP_DEPTH 1
+#endif
+#ifndef FFX_OPTICALFLOW_NUM_THREADS
+#define FFX_OPTICALFLOW_NUM_THREADS [numthreads(FFX_OPTICALFLOW_THREAD_GROUP_WIDTH, FFX_OPTICALFLOW_THREAD_GROUP_HEIGHT, FFX_OPTICALFLOW_THREAD_GROUP_DEPTH)]
+#endif
 
-// Check is Wave64 is requested on this permutation
-FfxErrorCode opticalflowIsWave64(uint32_t permutationOptions, bool& isWave64);
+#include "opticalflow/ffx_opticalflow_prepare_luma.h"
 
-#if defined(__cplusplus)
+FFX_OPTICALFLOW_NUM_THREADS
+FFX_OPTICALFLOW_EMBED_ROOTSIG_CONTENT
+void CS(int2 iGlobalId : SV_DispatchThreadID, int  iLocalIndex : SV_GroupIndex)
+{
+    PrepareLuma(iGlobalId, iLocalIndex);
 }
-#endif // #if defined(__cplusplus)

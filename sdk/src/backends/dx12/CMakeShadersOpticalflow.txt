@@ -20,18 +20,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-# Set Vulkan specific compiler args
 set(OPTICALFLOW_API_BASE_ARGS
-    -compiler=glslang -e CS --target-env vulkan1.2 -S comp -Os -DFFX_GLSL=1)
-	
-# Compile glsl shaders
-# Optical flow needs all four permutation variants, not the two a GLSL build normally
-# emits: the blob accessor is AMD 1.1.3's, restored unmodified. See the note on
-# FX_COMPILE_FORCE_WAVE64 in gpu/CMakeCompileShaders.txt.
-set(FX_COMPILE_FORCE_WAVE64 ON)
+    -E CS -Wno-for-redefinition -Wno-ambig-lit-shift -DFFX_HLSL=1)
+
+# Compile hlsl shaders
 include("${FFX_GPU_PATH}/opticalflow/CMakeCompileOpticalflowShaders.txt")
-# Scoped deliberately. This file is included into the backend's scope, so leaving the
-# variable set would hand four permutation variants to every shader list compiled after
-# it -- NSS's and frame interpolation's included -- for no benefit: those accessors are
-# written against two. Unsetting keeps the request local to the component that needs it.
-unset(FX_COMPILE_FORCE_WAVE64)

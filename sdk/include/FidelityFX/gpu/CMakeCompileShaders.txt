@@ -84,6 +84,23 @@ function(compile_shaders_with_depfile
 	set(HLSL_WAVE32_ARGS )
 	set(HLSL_16BIT_ARGS )
 	set(SUPPORT_WAVE64 OFF)
+
+	# A caller may set FX_COMPILE_FORCE_WAVE64 before including a shader list to ask for
+	# the wave64 permutation variants even for GLSL.
+	#
+	# The fork emits two variants per GLSL pass -- wave32 and wave32-16bit -- and every
+	# component's blob accessor in this tree is written against that. Optical flow's is
+	# not: it is AMD 1.1.3's, restored, and that one expects four. Rather than rewrite its
+	# seven accessor functions against a scheme whose 16-bit selection this tree cannot
+	# show (1.1.3's third parameter is unnamed and unused, so the fp16 choice travels in
+	# the permutation key), the shaders that need four variants ask for four.
+	#
+	# Off by default: unset, nothing below changes and every other component still gets
+	# exactly the two variants it was validated against. Nothing later resets SUPPORT_WAVE64
+	# to OFF, so the HLSL branch below simply keeps it on.
+	if (FX_COMPILE_FORCE_WAVE64)
+		set(SUPPORT_WAVE64 ON)
+	endif()
 	if (SHADER_EXT STREQUAL ".HLSL")
 		set(SUPPORT_WAVE64 ON)
 		set(INCLUDE_SPACE " ")

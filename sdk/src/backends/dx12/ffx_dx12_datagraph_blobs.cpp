@@ -41,6 +41,7 @@
 
 /* The same descriptors the Vulkan backend serves. */
 #include <nfru_v1_int8.h>
+#include "blob_accessors/ffx_opticalflow_shaderblobs.h"
 #include <nss_v1_0_1_high_int8.h>
 #include <nss_v1_0_1_mid_low_int8.h>
 
@@ -72,11 +73,27 @@ FfxErrorCode ffxGetPermutationBlobByIndex(
     else
     {
         /*
-         * A compute-shader request. There are no compute shaders in this backend, so say
-         * so instead of handing back a zeroed blob that the caller would then assert on
-         * or dereference.
+         * A compute-shader request.
+         *
+         * Optical flow is served. This backend has no HLSL of its own -- the fork deleted
+         * every effect shader when it deleted the D3D12 backend -- but the seven compute
+         * passes AMD's optical flow needs are restored from FidelityFX SDK 1.1.3, and the
+         * D3D12 permutation driver generates all four variants per pass, so the reference
+         * accessor works here unmodified. This is the first compute-shader capability in
+         * this backend; the same route is what NSS's and frame interpolation's own passes
+         * would need.
          */
-        return FFX_ERROR_BACKEND_API_ERROR;
+        switch (effectId)
+        {
+        case ARM_EFFECT_OPTICALFLOW:
+            return opticalflowGetPermutationBlobByIndex(
+                (FfxOpticalflowPass)passId, permutationOptions, outBlob, outVertBlob);
+
+        default:
+            /* Everything else still has no shader here, and saying so is better than
+             * handing back a zeroed blob that the caller asserts on or dereferences. */
+            return FFX_ERROR_BACKEND_API_ERROR;
+        }
     }
 
     switch (effectId)

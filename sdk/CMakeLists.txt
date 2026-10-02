@@ -106,7 +106,22 @@ endif()
 # now checked in by hand under sdk/src/backends/vk/data_graphs/. It also crashed
 # with 0xC0000409 on this repository's own .vgf files.
 if(CMAKE_HOST_WIN32)
+	# Two shader compilers live in tools/binary_store, and which one is needed depends on the
+# backend:
+#
+#   FidelityFX_SC.exe        the fork's build. GLSL only -- it fails with
+#                            "Only GLSLCompiler is currently supported." on any HLSL.
+#                            This is what produced the currently-validated SPIR-V, so the
+#                            Vulkan build keeps using it.
+#   FidelityFX_SC_hlsl.exe   AMD FidelityFX SDK 1.1.3's build, which handles HLSL and
+#                            needs dxcompiler.dll / dxil.dll alongside it. The D3D12
+#                            build needs this one: the fork deleted every HLSL, but
+#                            optical flow's seven compute passes are being restored.
+if (FFX_GRAPHICS_API STREQUAL "dx12")
+	set(FFX_SC_EXECUTABLE ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/FidelityFX_SC_hlsl.exe)
+else()
 	set(FFX_SC_EXECUTABLE ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/FidelityFX_SC.exe)
+endif()
 	# we need to use the glslangValidator that supports ML extensions for Vulkan
 	set(FFX_GLSLANG_EXE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/glslangValidator.exe)
 else()

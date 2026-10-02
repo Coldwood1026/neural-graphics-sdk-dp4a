@@ -308,6 +308,8 @@ endif()
 
 if (FFX_OF OR FFX_ALL)
 	target_compile_definitions(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE FFX_OF)
+	# SPD first: optical flow's luminance pyramid pass includes spd/ffx_spd.h.
+	include (CMakeShadersSPD.txt)
 	include (CMakeShadersOpticalflow.txt)
 endif()
 

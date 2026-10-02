@@ -108,6 +108,14 @@ set(NSS_DP4A_DX12_SOURCE
     "${FFX_SRC_BACKENDS_PATH}/shared/nss_dp4a/src/nss_dp4a_dx12.cpp"
 )
 list(APPEND PRIVATE_SOURCE ${NSS_DP4A_DX12_SOURCE})
+# Optical flow's blob accessor, and SPD's (the OF luminance pyramid pass includes
+# spd/ffx_spd.h). These are AMD 1.1.3 files restored from the reference; unlike the dp4a
+# module above they hold no data of their own, only links to the generated permutation
+# headers, so they are not a licensing question.
+set(NSS_OF_ACCESSOR_SOURCE
+    "${FFX_SRC_BACKENDS_PATH}/shared/blob_accessors/ffx_opticalflow_shaderblobs.cpp"
+    "${FFX_SRC_BACKENDS_PATH}/shared/blob_accessors/ffx_spd_shaderblobs.cpp")
+list(APPEND PRIVATE_SOURCE ${NSS_OF_ACCESSOR_SOURCE})
 
 file(GLOB_RECURSE PUBLIC_SOURCE "${FFX_HOST_BACKENDS_PATH}/dx12/*.h")
 
@@ -120,6 +128,16 @@ endif()
 target_include_directories(ffx_backend_dx12_${FFX_PLATFORM_NAME} PRIVATE
     ${FFX_INCLUDE_PATH}
     ${FFX_SRC_BACKENDS_PATH}/shared
+    "${FFX_SRC_BACKENDS_PATH}/shared/blob_accessors"
+    # The blob accessors reach into the effect's own private header by the path it is
+    # included with elsewhere, "opticalflow/ffx_opticalflow_private.h", which resolves
+    # against the components directory.
+    "${FFX_COMPONENTS_PATH}"
+    # The GPU-side headers the restored optical flow passes are built from, and SPD's,
+    # which the luminance pyramid pass includes.
+    "${FFX_INCLUDE_PATH}/FidelityFX/gpu"
+    "${FFX_INCLUDE_PATH}/FidelityFX/gpu/opticalflow"
+    "${FFX_INCLUDE_PATH}/FidelityFX/gpu/spd"
     "${FFX_SRC_BACKENDS_PATH}/shared/nfru_dp4a"
     # The NSS module: include/ holds nss_dp4a.h and nss_dp4a_dx12.h, generated/ its baked
     # model and DXIL headers, src/ its own headers.
@@ -148,6 +166,9 @@ target_compile_definitions(ffx_backend_dx12_${FFX_PLATFORM_NAME} PRIVATE
     NFRU_DP4A_INTERNAL
     # Same arrangement for NSS: its C API must not reach the host's export table either.
     NSS_DP4A_INTERNAL
+    # The optical flow effect is built into this backend; its blob accessor is guarded on
+    # this, and so is the dispatcher it will eventually share with the Vulkan backend.
+    FFX_OF
     NOMINMAX
     WIN32_LEAN_AND_MEAN
 )
@@ -170,3 +191,37 @@ if(MSVC)
 endif()
 
 set_target_properties(ffx_backend_dx12_${FFX_PLATFORM_NAME} PROPERTIES FOLDER Backends)
+
+# -----------------------------------------------------------------------------
+# Shader compilation.
+#
+# This target had none: it was built data-graph-only, so the fork's deletion of every
+# HLSL simply meant there was nothing to compile. Optical flow changes that -- its seven
+# compute passes are real HLSL shaders -- so the permutation step is switched on here.
+#
+# Only optical flow and SPD are listed. Every other effect's HLSL is still absent from
+# this tree; their blob accessors are not compiled and their pipeline creation requests
+# are refused explicitly by ffx_dx12_datagraph_blobs.cpp. That is deliberate: this is the
+# first compute-shader capability in this backend, and widening it is a separate job.
+#
+# The D3D12 permutation driver treats .hlsl as HLSL and sets SUPPORT_WAVE64 ON, so all
+# four variants per pass are generated here -- which is why the reference's optical flow
+# accessor works unmodified, and why the Vulkan side (GLSL, two variants) needs a
+# different fix for the same component.
+# -----------------------------------------------------------------------------
+get_filename_component(FFX_PASS_SHADER_OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}/../shaders/dx12 ABSOLUTE)
+target_include_directories(ffx_backend_dx12_${FFX_PLATFORM_NAME} PRIVATE ${FFX_PASS_SHADER_OUTPUT_PATH})
+file(MAKE_DIRECTORY ${FFX_PASS_SHADER_OUTPUT_PATH})
+set(FFX_SC_DEPENDENT_TARGET ffx_backend_dx12_${FFX_PLATFORM_NAME})
+
+if (FFX_OF OR FFX_ALL)
+    # SPD first: the luminance pyramid pass includes spd/ffx_spd.h.
+    include (CMakeShadersSPD.txt)
+    include (CMakeShadersOpticalflow.txt)
+endif()
+
+if (FFX_SC_PERMUTATION_OUTPUTS)
+    add_custom_target(ffx_shader_permutations_dx12 DEPENDS ${FFX_SC_PERMUTATION_OUTPUTS})
+    add_dependencies(${FFX_SC_DEPENDENT_TARGET} ffx_shader_permutations_dx12)
+    set_target_properties(ffx_shader_permutations_dx12 PROPERTIES FOLDER Backends)
+endif()

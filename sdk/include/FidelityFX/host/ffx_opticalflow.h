@@ -63,15 +63,35 @@ extern "C" {
 
 typedef enum FfxOpticalflowPass
 {
-    FFX_OPTICALFLOW_PASS_COMPUTE_MOTION_FROM_DEPTH = 0,
+    /*
+     * AMD FidelityFX SDK 1.1.3's seven compute passes.
+     *
+     * These come first because createPipelineStates() iterates from zero to
+     * FFX_OPTICALFLOW_PASS_COUNT and creates one pipeline per value.
+     */
+    FFX_OPTICALFLOW_PASS_PREPARE_LUMA = 0,
+    FFX_OPTICALFLOW_PASS_GENERATE_OPTICAL_FLOW_INPUT_PYRAMID,
+    FFX_OPTICALFLOW_PASS_GENERATE_SCD_HISTOGRAM,
+    FFX_OPTICALFLOW_PASS_COMPUTE_SCD_DIVERGENCE,
+    FFX_OPTICALFLOW_PASS_COMPUTE_OPTICAL_FLOW_ADVANCED_V5,
+    FFX_OPTICALFLOW_PASS_FILTER_OPTICAL_FLOW_V5,
+    FFX_OPTICALFLOW_PASS_SCALE_OPTICAL_FLOW_ADVANCED_V5,
 
-    FFX_OPTICALFLOW_PASS_COUNT
+    /* The fork's own MV-hints pass. Kept because the frame generation provider and the
+     * MV-hints path name it; deliberately past the count so the pipeline loop skips it. */
+    FFX_OPTICALFLOW_PASS_COMPUTE_MOTION_FROM_DEPTH = 7,
+
+    FFX_OPTICALFLOW_PASS_COUNT = 7
 } FfxOpticalflowPass;
 
 typedef enum FfxOpticalflowInitializationFlagBits
 {
     FFX_OPTICALFLOW_ENABLE_DEPTH_INVERTED    = (1 << 0),
     FFX_OPTICALFLOW_ENABLE_MV_HINTS_FRAGMENT = (1 << 1),
+
+    /* AMD 1.1.3's flag. Bits 0 and 1 were already taken by the fork's two, so this takes
+     * the next free bit rather than the value it had upstream. */
+    FFX_OPTICALFLOW_ENABLE_TEXTURE1D_USAGE   = (1 << 2),
 
 } FfxOpticalflowInitializationFlagBits;
 
@@ -116,6 +136,16 @@ typedef struct FfxOpticalFlowDispatchDescription
              colorTm1;  ///< A <c><i>FfxResource</i></c> containing the output color buffer for the previous frame, used for computing MV hints and motion vectors.
     uint32_t meanFlowL1NormHint;  ///< Optional mean L1 norm flow hint. 0 means backend default.
     bool     reset;               ///< A boolean value which when set to true, indicates the camera has moved discontinuously.
+    /* AMD 1.1.3 target for the scene-change-detection histogram. */
+    FfxResource      opticalFlowSCD;
+
+    /*
+     * AMD 1.1.3 fields. The fork's implementation derived the transfer function from the
+     * backend and left luminance alone; the restored implementation takes both from the
+     * caller. Defaults are the linear/smpte2084-agnostic case the fork assumed.
+     */
+    int              backbufferTransferFunction;
+    FfxFloatCoords2D minMaxLuminance;
 } FfxOpticalFlowDispatchDescription;
 
 typedef struct FfxOpticalFlowSharedResourceDescriptions
@@ -124,6 +154,12 @@ typedef struct FfxOpticalFlowSharedResourceDescriptions
     FfxCreateResourceDescription depthTm1;
     FfxCreateResourceDescription depthTm1Next;
     FfxCreateResourceDescription colorTm1;
+    /*
+     * AMD 1.1.3 returns a scene-change-detection resource alongside the flow vector. The
+     * fork's data-graph implementation had no SCD output; the restored compute
+     * implementation does, so the field is added rather than the provider being changed.
+     */
+    FfxCreateResourceDescription opticalFlowSCD;
 } FfxOpticalFlowSharedResourceDescriptions;
 
 /// A structure encapsulating the FidelityFX OpticalFlow context.
@@ -142,6 +178,19 @@ typedef struct FfxOpticalFlowContext
 {
     uint32_t data[FFX_OPTICALFLOW_CONTEXT_SIZE];  ///< An opaque set of <c>uint32_t</c> which contain the data for the context.
 } FfxOpticalFlowContext;
+
+/*
+ * AMD 1.1.3 spellings.
+ *
+ * The fork renamed these to FfxOpticalFlow* (capital F) for the C++ binding layer that
+ * ffx_provider_framegeneration.cpp uses, and the C++ binding layer is not being touched.
+ * The compute-shader implementation restored from 1.1.3 keeps its own spellings, so the
+ * two are aliased together here rather than renamed in either place.
+ */
+typedef FfxOpticalFlowContextDescription         FfxOpticalflowContextDescription;
+typedef FfxOpticalFlowDispatchDescription        FfxOpticalflowDispatchDescription;
+typedef FfxOpticalFlowSharedResourceDescriptions FfxOpticalflowSharedResourceDescriptions;
+typedef FfxOpticalFlowContext                    FfxOpticalflowContext;
 
 /// Create a FidelityFX OpticalFlow context from the parameters
 /// programmed to the <c><i>FfxOpticalFlowContextDescription</i></c> structure.

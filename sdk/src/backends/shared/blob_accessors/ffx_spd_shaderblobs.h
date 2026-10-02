@@ -23,7 +23,7 @@
 #pragma once
 
 #include "../ffx_shader_blobs.h"
-#include <FidelityFX/host/ffx_opticalflow.h>
+#include <FidelityFX/host/ffx_spd.h>
 #include <stdint.h>
 
 #if defined(__cplusplus)
@@ -31,14 +31,13 @@ extern "C" {
 #endif // #if defined(__cplusplus)
 
 // Get a DX12 shader blob for the specified pass and permutation index.
-FfxErrorCode opticalflowGetPermutationBlobByIndex(
-    FfxOpticalflowPass passId,
+FfxErrorCode spdGetPermutationBlobByIndex(
+    FfxSpdPass passId,
     uint32_t permutationOptions,
-    FfxShaderBlob* outBlob,
-    FfxShaderBlob* outVertBlob);
+    FfxShaderBlob* outBlob);
 
 // Check is Wave64 is requested on this permutation
-FfxErrorCode opticalflowIsWave64(uint32_t permutationOptions, bool& isWave64);
+FfxErrorCode spdIsWave64(uint32_t permutationOptions, bool& isWave64);
 
 #if defined(__cplusplus)
 }

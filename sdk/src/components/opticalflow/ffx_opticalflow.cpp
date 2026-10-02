@@ -1,7 +1,7 @@
 // This file is part of the FidelityFX SDK.
 //
 // Copyright (C) 2024 Advanced Micro Devices, Inc.
-//
+// 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files(the "Software"), to deal
 // in the Software without restriction, including without limitation the rights
@@ -20,869 +20,1043 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-// SPDX-FileCopyrightText: Copyright 2025-2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
-// SPDX-License-Identifier: MIT
-
-#include <algorithm>  // for max used inside SPD CPU code.
-#include <cfloat>     // for FLT_EPSILON
-#include <cmath>      // for fabs, abs, sinf, sqrt, etc.
-#include <string.h>   // for memset
-
+#include <algorithm>    // for max used inside SPD CPU code.
+#include <cmath>        // for fabs, abs, sinf, sqrt, etc.
+#include <string>       // for memset
+#include <cfloat>       // for FLT_EPSILON
 #include "FidelityFX/host/ffx_opticalflow.h"
-#define FFX_CPU
-
-#include "FidelityFX/gpu/ffx_core.h"
-#include "ffx_object_management.h"
-
-#include "FidelityFX/host/ffx_util.h"
 
 #ifdef __clang__
-#pragma clang diagnostic ignored "-Wunused-variable"
+#pragma clang diagnostic ignored "-Wunused-function"
+#pragma clang diagnostic ignored "-Wsign-compare"
 #endif
+
+#define FFX_CPU
+#include <FidelityFX/gpu/ffx_core.h>
+#include <FidelityFX/gpu/spd/ffx_spd.h>
+#include <FidelityFX/gpu/opticalflow/ffx_opticalflow_callbacks_hlsl.h>
+#include <ffx_object_management.h>
+
+#define FFX_OPTICALFLOW_MAX_QUEUED_FRAMES 16
 
 #include "ffx_opticalflow_private.h"
 
-// lists to map shader resource bindpoint name to resource identifier
-typedef struct ResourceBinding
+/*
+ * Name compatibility with this fork's interface.
+ *
+ * This is AMD's 1.1.3 component. The Arm fork split the single 1.1.3 UAV state into
+ * COMPUTE_UAV / PIXEL_UAV / GENERIC_UAV; both names are (1 << 1), so the mapping is exact.
+ * Aliased locally rather than in the public header so the divergence stays in one place.
+ */
+#ifndef FFX_RESOURCE_STATE_UNORDERED_ACCESS
+#define FFX_RESOURCE_STATE_UNORDERED_ACCESS FFX_RESOURCE_STATE_COMPUTE_UAV
+#endif
+
+typedef struct Binding
 {
-    // sdk data
-    uint32_t index;
+    uint32_t    index;
     char     name[64];
-} ResourceBinding;
+}Binding;
 
-constexpr int                srvTextureCount                         = 5;
-static const ResourceBinding srvTextureBindingTable[srvTextureCount] = {
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COLOR, "r_color_tp1"},
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_COLOR, "r_color_tm1"},
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_DEPTH, "r_depth"},
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_DEPTH, "r_depth_tm1"},
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COMPUTED_MOTION_VECTORS, "r_motion_vectors"},
+static const Binding srvBindingNames[] =
+{
+    {FFX_OF_BINDING_IDENTIFIER_INPUT_COLOR,                           "r_input_color"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT,                    "r_optical_flow_input"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS_INPUT,           "r_optical_flow_previous_input"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW,                          "r_optical_flow"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS,                 "r_optical_flow_previous"},
 };
 
-constexpr int                uavTextureCount                         = 4;
-static const ResourceBinding uavTextureBindingTable[uavTextureCount] = {
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_RESULT, "rw_flow"},
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COMPUTED_MOTION_VECTORS, "rw_motion_vectors"},
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_DEPTH, "rw_depth_tm1"},
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_COLOR, "rw_color_tm1"},
+static const Binding uavBindingNames[] =
+{
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT,                      "rw_optical_flow_input"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_1,              "rw_optical_flow_input_level_1"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_2,              "rw_optical_flow_input_level_2"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_3,              "rw_optical_flow_input_level_3"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_4,              "rw_optical_flow_input_level_4"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_5,              "rw_optical_flow_input_level_5"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_6,              "rw_optical_flow_input_level_6"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW,                            "rw_optical_flow"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_NEXT_LEVEL,                 "rw_optical_flow_next_level"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_HISTOGRAM,              "rw_optical_flow_scd_histogram"}, // scene change detection histogram
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM,     "rw_optical_flow_scd_previous_histogram"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_TEMP,                   "rw_optical_flow_scd_temp"},
+    {FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_OUTPUT,                 "rw_optical_flow_scd_output"},
 };
 
-static const ResourceBinding rtResourceBindingTable[] = {
-    {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COMPUTED_MOTION_VECTORS, "rw_motion_vectors"},
+static const Binding cbBindingNames[] =
+{
+    {FFX_OPTICALFLOW_CONSTANTBUFFER_IDENTIFIER,       "cbOF"},
+    {FFX_OPTICALFLOW_CONSTANTBUFFER_IDENTIFIER_SPD,   "cbOF_SPD"}
 };
+
+// Broad structure of the root signature.
+typedef enum OpticalFlowRootSignatureLayout {
+
+    OPTICALFLOW_ROOT_SIGNATURE_LAYOUT_UAVS,
+    OPTICALFLOW_ROOT_SIGNATURE_LAYOUT_SRVS,
+    OPTICALFLOW_ROOT_SIGNATURE_LAYOUT_CONSTANTS,
+    OPTICALFLOW_ROOT_SIGNATURE_LAYOUT_CONSTANTS_REGISTER_1,
+    OPTICALFLOW_ROOT_SIGNATURE_LAYOUT_PARAMETER_COUNT
+} OpticalFlowRootSignatureLayout;
+
+typedef struct OpticalFlowSpdConstants
+{
+    uint32_t                    mips;
+    uint32_t                    numworkGroups;
+    uint32_t                    workGroupOffset[2];
+
+    uint32_t                    numworkGroupsOpticalFlowInputPyramid;
+    uint32_t pad0_;
+    uint32_t pad1_;
+    uint32_t pad2_;
+
+} OpticalFlowSpdConstants;
 
 static FfxErrorCode patchResourceBindings(FfxPipelineState* inoutPipeline)
 {
     for (uint32_t srvIndex = 0; srvIndex < inoutPipeline->srvTextureCount; ++srvIndex)
     {
         int32_t mapIndex = 0;
-        for (mapIndex = 0; mapIndex < FFX_COUNTOF(srvTextureBindingTable); ++mapIndex)
+        for (mapIndex = 0; mapIndex < _countof(srvBindingNames); ++mapIndex)
         {
-            if (0 == strcmp(srvTextureBindingTable[mapIndex].name, inoutPipeline->srvTextureBindings[srvIndex].name))
+            if (0 == strcmp(srvBindingNames[mapIndex].name, inoutPipeline->srvTextureBindings[srvIndex].name))
                 break;
         }
-        if (mapIndex == FFX_COUNTOF(srvTextureBindingTable))
+        FFX_ASSERT(mapIndex < _countof(srvBindingNames));
+        if (mapIndex == _countof(srvBindingNames))
             return FFX_ERROR_INVALID_ARGUMENT;
 
-        inoutPipeline->srvTextureBindings[srvIndex].resourceIdentifier = srvTextureBindingTable[mapIndex].index;
+        inoutPipeline->srvTextureBindings[srvIndex].resourceIdentifier = srvBindingNames[mapIndex].index;
     }
 
     for (uint32_t uavIndex = 0; uavIndex < inoutPipeline->uavTextureCount; ++uavIndex)
     {
         int32_t mapIndex = 0;
-        for (mapIndex = 0; mapIndex < FFX_COUNTOF(uavTextureBindingTable); ++mapIndex)
+        for (mapIndex = 0; mapIndex < _countof(uavBindingNames); ++mapIndex)
         {
-            if (0 == strcmp(uavTextureBindingTable[mapIndex].name, inoutPipeline->uavTextureBindings[uavIndex].name))
+            if (0 == strcmp(uavBindingNames[mapIndex].name, inoutPipeline->uavTextureBindings[uavIndex].name))
                 break;
         }
-        if (mapIndex == FFX_COUNTOF(uavTextureBindingTable))
+        FFX_ASSERT(mapIndex < _countof(uavBindingNames));
+        if (mapIndex == _countof(uavBindingNames))
             return FFX_ERROR_INVALID_ARGUMENT;
 
-        inoutPipeline->uavTextureBindings[uavIndex].resourceIdentifier = uavTextureBindingTable[mapIndex].index;
+        inoutPipeline->uavTextureBindings[uavIndex].resourceIdentifier = uavBindingNames[mapIndex].index;
     }
 
-    for (uint32_t rtIndex = 0; rtIndex < inoutPipeline->rtCount; ++rtIndex)
+    for (uint32_t cbIndex = 0; cbIndex < inoutPipeline->constCount; ++cbIndex)
     {
         int32_t mapIndex = 0;
-        for (mapIndex = 0; mapIndex < FFX_COUNTOF(rtResourceBindingTable); ++mapIndex)
+        for (mapIndex = 0; mapIndex < _countof(cbBindingNames); ++mapIndex)
         {
-            if (0 == strcmp(rtResourceBindingTable[mapIndex].name, inoutPipeline->rtBindings[rtIndex].name))
+            if (0 == strcmp(cbBindingNames[mapIndex].name, inoutPipeline->constantBufferBindings[cbIndex].name))
                 break;
         }
-        if (mapIndex == FFX_COUNTOF(rtResourceBindingTable))
+        FFX_ASSERT(mapIndex < _countof(cbBindingNames));
+        if (mapIndex == _countof(cbBindingNames))
             return FFX_ERROR_INVALID_ARGUMENT;
 
-        inoutPipeline->rtBindings[rtIndex].resourceIdentifier = rtResourceBindingTable[mapIndex].index;
+        inoutPipeline->constantBufferBindings[cbIndex].resourceIdentifier = cbBindingNames[mapIndex].index;
     }
 
     return FFX_OK;
 }
 
-static FfxOpticalFlowDescription createOpticalFlowDescription(FfxSurfaceFormat               colorFormat,
-                                                              FfxDimensions2D                resolution,
-                                                              FfxOpticalFlowGridSize         gridSize,
-                                                              FfxOpticalFlowPerformanceLevel performanceLevel)
+static uint32_t getPipelinePermutationFlags(uint32_t, FfxPass, bool fp16, bool force64, bool)
 {
-    // Mimic the shader blob memory style for now.
-    // TODO: We might want to dynamically allocate this and clean it up after we are done with it instead of allocating static memory.
-    static const char*                  g_srv_names[]            = {"r_color_tp1", "r_color_tm1", "r_motion_vectors"};
-    static uint32_t                     g_srv_texture_bindings[] = {0, 1, 2};
-    static uint32_t                     g_srv_textureCount[]     = {1, 1, 1};
-    static uint32_t                     g_srv_textureSpaces[]    = {0, 0, 0};
-    static FfxSurfaceFormat             g_srv_formats[]          = {colorFormat, colorFormat, FFX_SURFACE_FORMAT_R16G16_FLOAT};
-    static FfxOpticalFlowConnectionType g_srv_connection_types[] = {
-        // Connection type mapping between SDK resource names and DDK optical flow roles:
-        // The optical flow pipeline uses forward optical flow convention, where the TP1 (current frame)
-        // image is the "search" frame and TM1 (previous frame) is the "template" frame.
-        // In DDK terms:
-        //   FFX_OPTICAL_FLOW_CONNECTION_REFERENCE -> "search" frame
-        //   FFX_OPTICAL_FLOW_CONNECTION_INPUT     -> "template" frame
-        // In SDK terms:
-        //   "r_color_tp1"     = TP1 (current frame) color  -> "search" frame -> maps to FFX_OPTICAL_FLOW_CONNECTION_REFERENCE
-        //   "r_color_tm1" = TM1 (previous frame) color -> "template" frame -> maps to FFX_OPTICAL_FLOW_CONNECTION_INPUT
-        FFX_OPTICAL_FLOW_CONNECTION_REFERENCE,
-        FFX_OPTICAL_FLOW_CONNECTION_INPUT,
-        FFX_OPTICAL_FLOW_CONNECTION_HINT};
-
-    static const char*                  g_uav_names[]            = {"rw_flow"};
-    static uint32_t                     g_uav_texture_bindings[] = {3};
-    static uint32_t                     g_uav_textureCount[]     = {1};
-    static uint32_t                     g_uav_textureSpaces[]    = {0};
-    static FfxOpticalFlowConnectionType g_uav_connection_types[] = {FFX_OPTICAL_FLOW_CONNECTION_FLOW_VECTOR};
-    static FfxSurfaceFormat             g_uav_formats[]          = {FFX_SURFACE_FORMAT_R16G16_FLOAT};
-
-    FfxOpticalFlowDescription ofDesc{};
-
-    ofDesc.srvTextureCount               = sizeof(g_srv_texture_bindings) / sizeof(g_srv_texture_bindings[0]);
-    ofDesc.boundSRVTextureNames          = g_srv_names;
-    ofDesc.boundSRVTextures              = g_srv_texture_bindings;
-    ofDesc.boundSRVTextureCounts         = g_srv_textureCount;
-    ofDesc.boundSRVTextureSpaces         = g_srv_textureSpaces;
-    ofDesc.boundSRVTextureConnectionType = g_srv_connection_types;
-    ofDesc.boundSRVTextureFormats        = g_srv_formats;
-    // Input MVs are R16G16F, Color is in the passed in format
-
-    ofDesc.uavTextureCount               = sizeof(g_uav_texture_bindings) / sizeof(g_uav_texture_bindings[0]);
-    ofDesc.boundUAVTextureNames          = g_uav_names;
-    ofDesc.boundUAVTextures              = g_uav_texture_bindings;
-    ofDesc.boundUAVTextureCounts         = g_uav_textureCount;
-    ofDesc.boundUAVTextureSpaces         = g_uav_textureSpaces;
-    ofDesc.boundUAVTextureConnectionType = g_uav_connection_types;
-    ofDesc.boundUAVTextureFormats        = g_uav_formats;
-
-    // OF metadata
-    ofDesc.dimensions       = resolution;
-    ofDesc.gridSize         = gridSize;
-    ofDesc.performanceLevel = performanceLevel;
-
-    return ofDesc;
+    uint32_t flags = 0;
+    flags |= (force64) ? OPTICALFLOW_SHADER_PERMUTATION_FORCE_WAVE64 : 0;
+    flags |= (fp16) ? OPTICALFLOW_SHADER_PERMUTATION_ALLOW_FP16 : 0;
+    return flags;
 }
 
-static uint32_t getPipelinePermutationOptions(uint32_t contextFlags)
-{
-    uint32_t permutationOptions = 0;
-
-    // Check for depth inverted flag
-    if (contextFlags & FFX_OPTICALFLOW_ENABLE_DEPTH_INVERTED)
-    {
-        permutationOptions |= OPTICALFLOW_SHADER_PERMUTATION_DEPTH_INVERTED;
-    }
-
-    // Check for MV hints fragment flag
-    if (contextFlags & FFX_OPTICALFLOW_ENABLE_MV_HINTS_FRAGMENT)
-    {
-        permutationOptions |= OPTICALFLOW_SHADER_PERMUTATION_MV_HINTS_FRAGMENT;
-    }
-
-    return permutationOptions;
-}
-
-static FfxErrorCode createPipelineStates(OpticalFlowContext_Private* context)
+static FfxErrorCode createPipelineStates(FfxOpticalflowContext_Private* context)
 {
     FFX_ASSERT(context);
 
-    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineOpticalflow, context->effectContextId);
+    constexpr size_t samplerCount = 2;
+    FfxSamplerDescription samplerDescs[samplerCount] = {
+        {FFX_FILTER_TYPE_MINMAGMIP_POINT, FFX_ADDRESS_MODE_CLAMP, FFX_ADDRESS_MODE_CLAMP, FFX_ADDRESS_MODE_CLAMP, FFX_BIND_COMPUTE_SHADER_STAGE},
+        {FFX_FILTER_TYPE_MINMAGMIP_LINEAR, FFX_ADDRESS_MODE_CLAMP, FFX_ADDRESS_MODE_CLAMP, FFX_ADDRESS_MODE_CLAMP, FFX_BIND_COMPUTE_SHADER_STAGE} };
 
-    FfxOpticalFlowDescription ofDesc = createOpticalFlowDescription(context->contextDescription.backBufferFormat,
-                                                                    context->contextDescription.resolution,
-                                                                    context->contextDescription.gridSize,
-                                                                    context->contextDescription.performanceLevel);
+    const size_t rootConstantCount = 2;
+    FfxRootConstantDescription rootConstantDescs[2] = { {sizeof(OpticalflowConstants) / sizeof(uint32_t),    FFX_BIND_COMPUTE_SHADER_STAGE},
+                                                        {sizeof(OpticalFlowSpdConstants) / sizeof(uint32_t), FFX_BIND_COMPUTE_SHADER_STAGE} };
+    FfxPipelineDescription pipelineDescription  = {};
+    pipelineDescription.stage                   = FFX_BIND_COMPUTE_SHADER_STAGE;
+    pipelineDescription.contextFlags            = context->contextDescription.flags;
+    pipelineDescription.samplerCount            = samplerCount;
+    pipelineDescription.samplers                = samplerDescs;
+    pipelineDescription.rootConstantBufferCount = rootConstantCount;
+    pipelineDescription.rootConstants           = rootConstantDescs;
 
-    // TODO: add more validation on the connection type with device caps like costSupported, hintSupported
+    FfxDeviceCapabilities capabilities;
+    context->contextDescription.backendInterface.fpGetDeviceCapabilities(&context->contextDescription.backendInterface, &capabilities);
 
-    FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateOpticalFlowPipeline(
-        &context->contextDescription.backendInterface, "ARM-OpticalFlow", ofDesc, context->effectContextId, &context->pipelineOpticalflow));
+    bool haveShaderModel66 = capabilities.maximumSupportedShaderModel >= FFX_SHADER_MODEL_6_6;
+    bool supportedFP16     = capabilities.fp16Supported;
+    bool canForceWave64    = false;
+    bool useLut            = false;
 
-    patchResourceBindings(&context->pipelineOpticalflow);
-
-    context->useMVHintsFragment = !!(context->contextDescription.flags & FFX_OPTICALFLOW_ENABLE_MV_HINTS_FRAGMENT);
-    if (context->useMVHintsFragment)
+    const uint32_t waveLaneCountMin = capabilities.waveLaneCountMin;
+    const uint32_t waveLaneCountMax = capabilities.waveLaneCountMax;
+    if (waveLaneCountMin == 32 && waveLaneCountMax == 64)
     {
-        ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineFragmentMVHints, context->effectContextId);
-
-        FfxPipelineDescription pipelineDescription = {};
-        pipelineDescription.stage                  = FFX_BIND_PIXEL_SHADER_STAGE;
-        pipelineDescription.contextFlags           = context->contextDescription.flags;
-
-        FfxRootConstantDescription rootConstantDescs;
-        rootConstantDescs.size                      = sizeof(context->computeMVHintsConstants);
-        rootConstantDescs.stage                     = FFX_BIND_PIXEL_SHADER_STAGE;
-        pipelineDescription.rootConstantBufferCount = 1;
-        pipelineDescription.rootConstants           = &rootConstantDescs;
-
-        strncpy(pipelineDescription.name, "ARM-OpticalFlow-ComputeMVHints", FFX_RESOURCE_NAME_SIZE - 1);
-        pipelineDescription.name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-
-        uint32_t permutationOptions = getPipelinePermutationOptions(context->contextDescription.flags);
-
-        FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateGraphicsPipeline(&context->contextDescription.backendInterface,
-                                                                                           ARM_EFFECT_OPTICALFLOW,
-                                                                                           FFX_OPTICALFLOW_PASS_COMPUTE_MOTION_FROM_DEPTH,
-                                                                                           permutationOptions,
-                                                                                           &pipelineDescription,
-                                                                                           context->effectContextId,
-                                                                                           &context->pipelineFragmentMVHints));
-
-        patchResourceBindings(&context->pipelineFragmentMVHints);
+        useLut         = true;
+        canForceWave64 = haveShaderModel66;
     }
     else
-    {
-        ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineComputeMVHints, context->effectContextId);
+        canForceWave64 = false;
 
-        FfxPipelineDescription pipelineDescription = {};
-        pipelineDescription.stage                  = FFX_BIND_COMPUTE_SHADER_STAGE;
-        pipelineDescription.contextFlags           = context->contextDescription.flags;
+    uint32_t contextFlags = context->contextDescription.flags;
 
-        FfxRootConstantDescription rootConstantDescs;
-        rootConstantDescs.size                      = sizeof(context->computeMVHintsConstants);
-        rootConstantDescs.stage                     = FFX_BIND_COMPUTE_SHADER_STAGE;
-        pipelineDescription.rootConstantBufferCount = 1;
-        pipelineDescription.rootConstants           = &rootConstantDescs;
+    auto CreateComputePipeline = [&](FfxPass pass, const char* name, FfxPipelineState* pipeline) -> FfxErrorCode {
+        ffxSafeReleasePipeline(&context->contextDescription.backendInterface, pipeline, context->effectContextId);
+        strncpy(pipelineDescription.name, name, FFX_RESOURCE_NAME_SIZE - 1); pipelineDescription.name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateComputePipeline(
+            &context->contextDescription.backendInterface,
+            FFX_EFFECT_OPTICALFLOW,
+            pass,
+            getPipelinePermutationFlags(contextFlags, pass, supportedFP16, canForceWave64, useLut),
+            &pipelineDescription,
+            context->effectContextId,
+            pipeline));
 
-        strncpy(pipelineDescription.name, "ARM-OpticalFlow-ComputeMVHints", FFX_RESOURCE_NAME_SIZE - 1);
-        pipelineDescription.name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        patchResourceBindings(pipeline);
+        return FFX_OK;
+    };
 
-        uint32_t permutationOptions = getPipelinePermutationOptions(context->contextDescription.flags);
-        permutationOptions &= ~OPTICALFLOW_SHADER_PERMUTATION_MV_HINTS_FRAGMENT;
-
-        FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateComputePipeline(&context->contextDescription.backendInterface,
-                                                                                          ARM_EFFECT_OPTICALFLOW,
-                                                                                          FFX_OPTICALFLOW_PASS_COMPUTE_MOTION_FROM_DEPTH,
-                                                                                          permutationOptions,
-                                                                                          &pipelineDescription,
-                                                                                          context->effectContextId,
-                                                                                          &context->pipelineComputeMVHints));
-
-        patchResourceBindings(&context->pipelineComputeMVHints);
-    }
+    CreateComputePipeline(FFX_OPTICALFLOW_PASS_GENERATE_OPTICAL_FLOW_INPUT_PYRAMID, "Opticalflow_InputPyramid", & context->pipelineGenerateOpticalFlowInputPyramid);
+    pipelineDescription.rootConstantBufferCount = 1;
+    CreateComputePipeline(FFX_OPTICALFLOW_PASS_PREPARE_LUMA, "Opticalflow_Luma", &context->pipelinePrepareLuma);
+    CreateComputePipeline(FFX_OPTICALFLOW_PASS_GENERATE_SCD_HISTOGRAM, "Opticalflow_SCD_Histogram", &context->pipelineGenerateSCDHistogram);
+    CreateComputePipeline(FFX_OPTICALFLOW_PASS_COMPUTE_SCD_DIVERGENCE, "Opticalflow_SCD_Divergence", &context->pipelineComputeSCDDivergence);
+    CreateComputePipeline(FFX_OPTICALFLOW_PASS_COMPUTE_OPTICAL_FLOW_ADVANCED_V5, "Opticalflow_Search", &context->pipelineComputeOpticalFlowAdvancedV5);
+    CreateComputePipeline(FFX_OPTICALFLOW_PASS_FILTER_OPTICAL_FLOW_V5, "Opticalflow_Filter", &context->pipelineFilterOpticalFlowV5);
+    CreateComputePipeline(FFX_OPTICALFLOW_PASS_SCALE_OPTICAL_FLOW_ADVANCED_V5, "Opticalflow_Upscale", &context->pipelineScaleOpticalFlowAdvancedV5);
 
     return FFX_OK;
 }
 
-static FfxErrorCode createResourceFromDescription(OpticalFlowContext_Private* context, const FfxInternalResourceDescription* resDesc)
+constexpr uint32_t OpticalFlowMaxPyramidLevels = 7;
+constexpr uint32_t HistogramBins = 256;
+constexpr uint32_t HistogramsPerDim = 3;
+constexpr uint32_t HistogramShifts = 3;
+
+static FfxDimensions2D GetOpticalFlowTextureSize(const FfxDimensions2D& displaySize, const uint32_t opticalFlowBlockSize)
 {
-    const FfxResourceType        resourceType        = resDesc->type;
-    const FfxResourceDescription resourceDescription = {resourceType,
-                                                        resDesc->format,
-                                                        resDesc->width,
-                                                        resDesc->height,
-                                                        (resourceType == FFX_RESOURCE_TYPE_TENSOR) ? resDesc->channel : 1,
-                                                        resDesc->mipCount,
-                                                        resDesc->flags,
-                                                        resDesc->usage,
-                                                        resDesc->batchSize,
-                                                        resDesc->shapeSize};
-    const FfxResourceStates initialState = (resDesc->usage == FFX_RESOURCE_USAGE_READ_ONLY) ? FFX_RESOURCE_STATE_COMPUTE_READ : FFX_RESOURCE_STATE_GENERIC_UAV;
-    const FfxCreateResourceDescription createResourceDescription = {
-        FFX_HEAP_TYPE_DEFAULT, resourceDescription, initialState, resDesc->name, resDesc->id, resDesc->initData};
-    return context->contextDescription.backendInterface.fpCreateResource(
-        &context->contextDescription.backendInterface, &createResourceDescription, context->effectContextId, &context->srvResources[resDesc->id]);
+    uint32_t width = (displaySize.width + opticalFlowBlockSize - 1) / opticalFlowBlockSize;
+    uint32_t height = (displaySize.height + opticalFlowBlockSize - 1) / opticalFlowBlockSize;
+    return { width, height };
 }
 
-static FfxErrorCode opticalFlowVkCreate(OpticalFlowContext_Private* context, const FfxOpticalFlowContextDescription* contextDescription)
+static FfxDimensions2D GetOpticalFlowHistogramSize(int level)
+{
+    const uint32_t searchRadius = 8;
+    uint32_t maxVelocity = searchRadius * (1 << (OpticalFlowMaxPyramidLevels - 1 - level));
+    uint32_t binsPerDimension = 2 * maxVelocity + 1;
+    return { binsPerDimension, binsPerDimension };
+}
+
+static FfxDimensions2D GetGlobalMotionSearchDispatchSize(int level)
+{
+    const uint32_t threadGroupSizeX = 16;
+    const uint32_t threadGroupSizeY = 16;
+    const FfxDimensions2D opticalFlowHistogramSize = GetOpticalFlowHistogramSize(level);
+    const uint32_t additionalElementsDueToShiftsX = opticalFlowHistogramSize.width / threadGroupSizeX;
+    const uint32_t additionalElementsDueToShiftsY = opticalFlowHistogramSize.height / threadGroupSizeY;
+    const uint32_t dispatchX = (opticalFlowHistogramSize.width + additionalElementsDueToShiftsX + threadGroupSizeX - 1) / threadGroupSizeX;
+    const uint32_t dispatchY = (opticalFlowHistogramSize.height + additionalElementsDueToShiftsY + threadGroupSizeY - 1) / threadGroupSizeY;
+    return { dispatchX, dispatchY };
+}
+
+static uint32_t GetSCDHistogramTextureWidth()
+{
+    return HistogramBins * (HistogramsPerDim * HistogramsPerDim);
+}
+
+static FfxErrorCode opticalflowCreate(FfxOpticalflowContext_Private* context, const FfxOpticalflowContextDescription* contextDescription)
 {
     FFX_ASSERT(context);
     FFX_ASSERT(contextDescription);
+    FfxErrorCode errorCode = FFX_OK;
 
-    // Setup the data for implementation.
-    memset(context, 0, sizeof(OpticalFlowContext_Private));
+    memset(context, 0, sizeof(FfxOpticalflowContext_Private));
     context->device = contextDescription->backendInterface.device;
 
-    memcpy(&context->contextDescription, contextDescription, sizeof(FfxOpticalFlowContextDescription));
+    memcpy(&context->contextDescription, contextDescription, sizeof(FfxOpticalflowContextDescription));
 
-    // Create the context.
-    FfxErrorCode errorCode = context->contextDescription.backendInterface.fpCreateBackendContext(
-        &context->contextDescription.backendInterface, ARM_EFFECT_OPTICALFLOW, nullptr, &context->effectContextId);
+    // Check version info - make sure we are linked with the right backend version
+    FfxVersionNumber version = context->contextDescription.backendInterface.fpGetSDKVersion(&context->contextDescription.backendInterface);
+    FFX_RETURN_ON_ERROR(version == FFX_SDK_MAKE_VERSION(1, 1, 2), FFX_ERROR_INVALID_VERSION);
+
+    errorCode = context->contextDescription.backendInterface.fpCreateBackendContext(&context->contextDescription.backendInterface, FFX_EFFECT_OPTICALFLOW, nullptr, &context->effectContextId);
     FFX_RETURN_ON_ERROR(errorCode == FFX_OK, errorCode);
 
-    // call out for device caps.
-    FfxDeviceCapabilities capabilities;
-    FFX_VALIDATE(context->contextDescription.backendInterface.fpGetDeviceCapabilities(&context->contextDescription.backendInterface, &capabilities));
-    if (!capabilities.dataGraphOFSupported)
-    {
-        return FFX_ERROR_NULL_DEVICE;
-    }
+    errorCode = context->contextDescription.backendInterface.fpGetDeviceCapabilities(&context->contextDescription.backendInterface, &context->deviceCapabilities);
+    FFX_RETURN_ON_ERROR(errorCode == FFX_OK, errorCode);
 
-    const bool outputGridSizeSupported = (contextDescription->gridSize & capabilities.supportedOutputGridSizes) != 0;
-    // TODO: add check on hint grid size when we start using hint.
-    // const bool hintGridSizeSupported   = (contextDescription->gridSize & capabilities.supportedHintGridSizes) != 0;
-    if (!outputGridSizeSupported)
-    {
-        return FFX_ERROR_NULL_DEVICE;
-    }
-
-    if ((contextDescription->resolution.width < capabilities.dataGraphOFMinWidth) ||
-        (contextDescription->resolution.height < capabilities.dataGraphOFMinHeight) ||
-        (contextDescription->resolution.width > capabilities.dataGraphOFMaxWidth) ||
-        (contextDescription->resolution.height > capabilities.dataGraphOFMaxHeight))
-    {
-        return FFX_ERROR_NULL_DEVICE;
-    }
-
-    // set defaults
-    context->firstExecution     = true;
+    context->firstExecution = true;
     context->resourceFrameIndex = 0;
 
-    // set inital view projection matrix
-    memcpy(context->lastFrameViewProjection, contextDescription->initialViewProjection, sizeof(context->lastFrameViewProjection));
+    context->constants.inputLumaResolution[0] = context->contextDescription.resolution.width;
+    context->constants.inputLumaResolution[1] = context->contextDescription.resolution.height;
 
-    const FfxDimensions2D        displaySize = contextDescription->resolution;
-    const FfxDimensions2D        renderSize  = contextDescription->maxRenderSize;
-    const FfxOpticalFlowGridSize gridSize    = contextDescription->gridSize;
-    context->opticalFlowSize                 = GetOpticalFlowTextureSizeFromBlockSize(displaySize, GetOpticalFlowBlockSize(gridSize));
+    FfxDimensions2D opticalFlowInputTextureSize = context->contextDescription.resolution;
 
-    const FfxResourceUsage otherProcessOutputImageUsage =
-        context->contextDescription.flags & FFX_OPTICALFLOW_ENABLE_MV_HINTS_FRAGMENT ? FFX_RESOURCE_USAGE_RENDERTARGET : FFX_RESOURCE_USAGE_UAV;
-    // Declare internal resources needed
-    const FfxInternalResourceDescription internalSurfaceDesc[] = {
-        {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COMPUTED_MOTION_VECTORS,
-         "ArmOF_Computed_Motion_Vectors",
-         FFX_RESOURCE_TYPE_TEXTURE2D,
-         FfxResourceUsage(otherProcessOutputImageUsage),
-         FFX_SURFACE_FORMAT_R16G16_FLOAT,
-         context->opticalFlowSize.width,
-         context->opticalFlowSize.height,
-         1,
-         FFX_RESOURCE_FLAGS_NONE,
-         {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED}},
+    const FfxResourceType texture1dResourceType = (context->contextDescription.flags & FFX_OPTICALFLOW_ENABLE_TEXTURE1D_USAGE) ? FFX_RESOURCE_TYPE_TEXTURE1D : FFX_RESOURCE_TYPE_TEXTURE2D;
+
+    uint32_t minBlockSize = 8;
+    const FfxDimensions2D opticalFlowTextureSize = GetOpticalFlowTextureSize(contextDescription->resolution, minBlockSize);
+
+    const FfxDimensions2D opticalFlowLevel1TextureSize = { FFX_ALIGN_UP(opticalFlowTextureSize.width, 2) / 2, FFX_ALIGN_UP(opticalFlowTextureSize.height, 2) / 2 };
+    const FfxDimensions2D opticalFlowLevel2TextureSize = { FFX_ALIGN_UP(opticalFlowLevel1TextureSize.width, 2) / 2, FFX_ALIGN_UP(opticalFlowLevel1TextureSize.height, 2) / 2 };
+    const FfxDimensions2D opticalFlowLevel3TextureSize = { FFX_ALIGN_UP(opticalFlowLevel2TextureSize.width, 2) / 2, FFX_ALIGN_UP(opticalFlowLevel2TextureSize.height, 2) / 2 };
+    const FfxDimensions2D opticalFlowLevel4TextureSize = { FFX_ALIGN_UP(opticalFlowLevel3TextureSize.width, 2) / 2, FFX_ALIGN_UP(opticalFlowLevel3TextureSize.height, 2) / 2 };
+    const FfxDimensions2D opticalFlowLevel5TextureSize = { FFX_ALIGN_UP(opticalFlowLevel4TextureSize.width, 2) / 2, FFX_ALIGN_UP(opticalFlowLevel4TextureSize.height, 2) / 2 };
+    const FfxDimensions2D opticalFlowLevel6TextureSize = { FFX_ALIGN_UP(opticalFlowLevel5TextureSize.width, 2) / 2, FFX_ALIGN_UP(opticalFlowLevel5TextureSize.height, 2) / 2 };
+    const FfxDimensions2D opticalFlowLevel7TextureSize = { FFX_ALIGN_UP(opticalFlowLevel6TextureSize.width, 2) / 2, FFX_ALIGN_UP(opticalFlowLevel6TextureSize.height, 2) / 2 };
+
+    const FfxDimensions2D opticalFlowHistogramTextureSize = GetOpticalFlowHistogramSize(0);
+
+    const FfxDimensions2D globalMotionSearchMaxDispatchSize = GetGlobalMotionSearchDispatchSize(0);
+    const uint32_t globalMotionSearchTextureWidth = 4 + (globalMotionSearchMaxDispatchSize.width * globalMotionSearchMaxDispatchSize.height);
+
+    const FfxInternalResourceDescription internalSurfaceDesc[] =    {
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1, "OPTICALFLOW_OpticalFlowInput1", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width, opticalFlowInputTextureSize.height, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_1, "OPTICALFLOW_OpticalFlowInput1Level1", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 1, opticalFlowInputTextureSize.height >> 1, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_2, "OPTICALFLOW_OpticalFlowInput1Level2", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 2, opticalFlowInputTextureSize.height >> 2, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_3, "OPTICALFLOW_OpticalFlowInput1Level3", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 3, opticalFlowInputTextureSize.height >> 3, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_4, "OPTICALFLOW_OpticalFlowInput1Level4", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 4, opticalFlowInputTextureSize.height >> 4, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_5, "OPTICALFLOW_OpticalFlowInput1Level5", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 5, opticalFlowInputTextureSize.height >> 5, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_6, "OPTICALFLOW_OpticalFlowInput1Level6", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 6, opticalFlowInputTextureSize.height >> 6, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2, "OPTICALFLOW_OpticalFlowInput2", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width, opticalFlowInputTextureSize.height, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_1, "OPTICALFLOW_OpticalFlowInput2Level1", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 1, opticalFlowInputTextureSize.height >> 1, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_2, "OPTICALFLOW_OpticalFlowInput2Level2", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 2, opticalFlowInputTextureSize.height >> 2, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_3, "OPTICALFLOW_OpticalFlowInput2Level3", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 3, opticalFlowInputTextureSize.height >> 3, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_4, "OPTICALFLOW_OpticalFlowInput2Level4", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 4, opticalFlowInputTextureSize.height >> 4, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_5, "OPTICALFLOW_OpticalFlowInput2Level5", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 5, opticalFlowInputTextureSize.height >> 5, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_6, "OPTICALFLOW_OpticalFlowInput2Level6", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R8_UINT, opticalFlowInputTextureSize.width >> 6, opticalFlowInputTextureSize.height >> 6, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1, "OPTICALFLOW_OpticalFlow1", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowTextureSize.width, opticalFlowTextureSize.height, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1_LEVEL_1, "OPTICALFLOW_OpticalFlow1Level1", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel1TextureSize.width, opticalFlowLevel1TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1_LEVEL_2, "OPTICALFLOW_OpticalFlow1Level2", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel2TextureSize.width, opticalFlowLevel2TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1_LEVEL_3, "OPTICALFLOW_OpticalFlow1Level3", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel3TextureSize.width, opticalFlowLevel3TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1_LEVEL_4, "OPTICALFLOW_OpticalFlow1Level4", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel4TextureSize.width, opticalFlowLevel4TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1_LEVEL_5, "OPTICALFLOW_OpticalFlow1Level5", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel5TextureSize.width, opticalFlowLevel5TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1_LEVEL_6, "OPTICALFLOW_OpticalFlow1Level6", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel6TextureSize.width, opticalFlowLevel6TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2, "OPTICALFLOW_OpticalFlow2", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowTextureSize.width, opticalFlowTextureSize.height, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2_LEVEL_1, "OPTICALFLOW_OpticalFlow2Level1", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel1TextureSize.width, opticalFlowLevel1TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2_LEVEL_2, "OPTICALFLOW_OpticalFlow2Level2", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel2TextureSize.width, opticalFlowLevel2TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2_LEVEL_3, "OPTICALFLOW_OpticalFlow2Level3", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel3TextureSize.width, opticalFlowLevel3TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2_LEVEL_4, "OPTICALFLOW_OpticalFlow2Level4", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel4TextureSize.width, opticalFlowLevel4TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2_LEVEL_5, "OPTICALFLOW_OpticalFlow2Level5", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel5TextureSize.width, opticalFlowLevel5TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2_LEVEL_6, "OPTICALFLOW_OpticalFlow2Level6", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowLevel6TextureSize.width, opticalFlowLevel6TextureSize.height, 1, FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_HISTOGRAM, "OPTICALFLOW_OpticalFlowSCDHistogram", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R32_UINT, GetSCDHistogramTextureWidth(), 1, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM, "OPTICALFLOW_OpticalFlowSCDPreviousHistogram", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R32_FLOAT, GetSCDHistogramTextureWidth(), 1, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
+
+        {   FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_TEMP, "OPTICALFLOW_OpticalFlowSCDTemp", FFX_RESOURCE_TYPE_TEXTURE2D, FFX_RESOURCE_USAGE_UAV,
+            FFX_SURFACE_FORMAT_R32_UINT, 3, 1, 1,  FFX_RESOURCE_FLAGS_NONE, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} },
     };
 
-    // clear the SRV resources to NULL.
-    memset(context->srvResources, 0, sizeof(context->srvResources));
+    memset(context->resources, 0, sizeof(context->resources));
 
-    for (int32_t currentSurfaceIndex = 0; currentSurfaceIndex < FFX_ARRAY_ELEMENTS(internalSurfaceDesc); ++currentSurfaceIndex)
-    {
-        FFX_VALIDATE(createResourceFromDescription(context, &internalSurfaceDesc[currentSurfaceIndex]));
+    for (int32_t currentSurfaceIndex = 0; currentSurfaceIndex < FFX_ARRAY_ELEMENTS(internalSurfaceDesc); ++currentSurfaceIndex) {
+
+        const FfxInternalResourceDescription* currentSurfaceDescription = &internalSurfaceDesc[currentSurfaceIndex];
+        const FfxResourceType resourceType = currentSurfaceDescription->height > 1 ? FFX_RESOURCE_TYPE_TEXTURE2D : texture1dResourceType;
+        const FfxResourceDescription resourceDescription = {
+            resourceType, currentSurfaceDescription->format,
+            currentSurfaceDescription->width, currentSurfaceDescription->height, 1,
+            currentSurfaceDescription->mipCount, FFX_RESOURCE_FLAGS_NONE, currentSurfaceDescription->usage };
+        const FfxResourceStates initialState = FFX_RESOURCE_STATE_UNORDERED_ACCESS;
+        const FfxCreateResourceDescription createResourceDescription = {
+            FFX_HEAP_TYPE_DEFAULT, resourceDescription, initialState, currentSurfaceDescription->name, currentSurfaceDescription->id, currentSurfaceDescription->initData };
+
+        FFX_VALIDATE(context->contextDescription.backendInterface.fpCreateResource(
+            &context->contextDescription.backendInterface,
+            &createResourceDescription,
+            context->effectContextId,
+            &context->resources[currentSurfaceDescription->id]));
     }
 
-    // copy resources to uavResrouces list
-    memcpy(context->uavResources, context->srvResources, sizeof(context->srvResources));
+    memset(context->srvBindings, 0, sizeof(context->srvBindings));
+    memset(context->uavBindings, 0, sizeof(context->uavBindings));
 
     {
+        context->refreshPipelineStates = false;
         errorCode = createPipelineStates(context);
         FFX_RETURN_ON_ERROR(errorCode == FFX_OK, errorCode);
     }
+
     return FFX_OK;
 }
 
-static FfxErrorCode opticalFlowVkRelease(OpticalFlowContext_Private* context)
+static FfxErrorCode opticalflowRelease(FfxOpticalflowContext_Private* context)
 {
     FFX_ASSERT(context);
 
-    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineOpticalflow, context->effectContextId);
-    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineComputeMVHints, context->effectContextId);
-    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineFragmentMVHints, context->effectContextId);
+    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelinePrepareLuma, context->effectContextId);
+    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineGenerateOpticalFlowInputPyramid, context->effectContextId);
+    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineGenerateSCDHistogram, context->effectContextId);
+    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineComputeSCDDivergence, context->effectContextId);
+    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineComputeOpticalFlowAdvancedV5, context->effectContextId);
+    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineFilterOpticalFlowV5, context->effectContextId);
+    ffxSafeReleasePipeline(&context->contextDescription.backendInterface, &context->pipelineScaleOpticalFlowAdvancedV5, context->effectContextId);
 
-    // unregister resources not created internally
-    context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COLOR]      = {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_NULL};
-    context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_DEPTH]      = {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_NULL};
-    context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_RESULT]     = {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_NULL};
-    context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_COLOR] = {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_NULL};
-    context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_DEPTH] = {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_NULL};
+    for (int32_t currentResourceIndex = 0; currentResourceIndex < FFX_OF_RESOURCE_IDENTIFIER_COUNT; ++currentResourceIndex) {
 
-    // release internal resources
-    for (int32_t currentResourceIndex = 0; currentResourceIndex < FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COUNT; ++currentResourceIndex)
-    {
-        ffxSafeReleaseResource(&context->contextDescription.backendInterface, context->srvResources[currentResourceIndex], context->effectContextId);
+        ffxSafeReleaseResource(&context->contextDescription.backendInterface, context->resources[currentResourceIndex], context->effectContextId);
     }
 
-    // Destroy the context
     context->contextDescription.backendInterface.fpDestroyBackendContext(&context->contextDescription.backendInterface, context->effectContextId);
 
     return FFX_OK;
 }
 
-static void scheduleDataGraph(OpticalFlowContext_Private* context, FfxPipelineState* pipeline, bool reset)
+static void scheduleDispatch(FfxOpticalflowContext_Private* context, const FfxPipelineState* pipeline, const char* pipelineName, uint32_t dispatchX, uint32_t dispatchY, uint32_t dispatchZ = 1)
 {
-    FfxGpuJobDescription dispatchJob = {FFX_GPU_JOB_DATA_GRAPH};
+    FfxComputeJobDescription jobDescriptor = {};
 
-    for (uint32_t currentShaderResourceViewIndex = 0; currentShaderResourceViewIndex < pipeline->srvTextureCount; ++currentShaderResourceViewIndex)
-    {
-        const uint32_t            currentResourceId = pipeline->srvTextureBindings[currentShaderResourceViewIndex].resourceIdentifier;
-        const FfxResourceInternal currentResource   = context->srvResources[currentResourceId];
-        dispatchJob.dataGraphJobDescription.srvTextures[currentShaderResourceViewIndex].resource = currentResource;
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.dataGraphJobDescription.srvTextures[currentShaderResourceViewIndex].name,
-                pipeline->srvTextureBindings[currentShaderResourceViewIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.dataGraphJobDescription.srvTextures[currentShaderResourceViewIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-    }
+    for (uint32_t currentShaderResourceViewIndex = 0; currentShaderResourceViewIndex < pipeline->srvTextureCount; ++currentShaderResourceViewIndex) {
 
-    for (uint32_t currentUnorderedAccessViewIndex = 0; currentUnorderedAccessViewIndex < pipeline->uavTextureCount; ++currentUnorderedAccessViewIndex)
-    {
-        const uint32_t currentResourceId = pipeline->uavTextureBindings[currentUnorderedAccessViewIndex].resourceIdentifier;
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.dataGraphJobDescription.uavTextures[currentUnorderedAccessViewIndex].name,
-                pipeline->uavTextureBindings[currentUnorderedAccessViewIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.dataGraphJobDescription.uavTextures[currentUnorderedAccessViewIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-
-        {
-            const FfxResourceInternal currentResource                                                 = context->uavResources[currentResourceId];
-            dispatchJob.dataGraphJobDescription.uavTextures[currentUnorderedAccessViewIndex].resource = currentResource;
-            dispatchJob.dataGraphJobDescription.uavTextures[currentUnorderedAccessViewIndex].mip      = 0;
-        }
-    }
-    if (!context->firstExecution && !reset)
-    {
-        // dispatchJob.dataGraphJobDescription.opticalFlowExecuteFlags = FFX_DATA_GRAPH_OPTICAL_FLOW_EXECUTE_INPUT_IS_PREVIOUS_REFERENCE;
-    }
-    dispatchJob.dataGraphJobDescription.pipeline = *pipeline;
-
-    context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &dispatchJob);
-}
-
-static void scheduleMVHintsAndCopyResources(
-    OpticalFlowContext_Private* context, const FfxPipelineState* pipeline, uint32_t dispatchX, uint32_t dispatchY, const char* debugName)
-{
-    FfxGpuJobDescription dispatchJob = {FFX_GPU_JOB_COMPUTE};
-    if (debugName != nullptr)
-    {
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.jobLabel, debugName, FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-    }
-
-    for (uint32_t currentShaderResourceViewIndex = 0; currentShaderResourceViewIndex < pipeline->srvTextureCount; ++currentShaderResourceViewIndex)
-    {
-        const uint32_t            currentResourceId = pipeline->srvTextureBindings[currentShaderResourceViewIndex].resourceIdentifier;
-        const FfxResourceInternal currentResource   = context->srvResources[currentResourceId];
-        dispatchJob.computeJobDescriptor.srvTextures[currentShaderResourceViewIndex].resource = currentResource;
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.computeJobDescriptor.srvTextures[currentShaderResourceViewIndex].name,
-                pipeline->srvTextureBindings[currentShaderResourceViewIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.computeJobDescriptor.srvTextures[currentShaderResourceViewIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-    }
-
-    for (uint32_t currentUnorderedAccessViewIndex = 0; currentUnorderedAccessViewIndex < pipeline->uavTextureCount; ++currentUnorderedAccessViewIndex)
-    {
-        const uint32_t currentResourceId = pipeline->uavTextureBindings[currentUnorderedAccessViewIndex].resourceIdentifier;
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.computeJobDescriptor.uavTextureNames[currentUnorderedAccessViewIndex],
-                pipeline->uavTextureBindings[currentUnorderedAccessViewIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.computeJobDescriptor.uavTextureNames[currentUnorderedAccessViewIndex][FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-
-        {
-            const FfxResourceInternal currentResource                                              = context->uavResources[currentResourceId];
-            dispatchJob.computeJobDescriptor.uavTextures[currentUnorderedAccessViewIndex].resource = currentResource;
-            dispatchJob.computeJobDescriptor.uavTextures[currentUnorderedAccessViewIndex].mip      = 0;
-        }
-    }
-
-    for (uint32_t currentTensorIndex = 0; currentTensorIndex < pipeline->srvTensorCount; ++currentTensorIndex)
-    {
-        const uint32_t            currentResourceId                              = pipeline->srvTensorBindings[currentTensorIndex].resourceIdentifier;
-        const FfxResourceInternal currentResource                                = context->srvResources[currentResourceId];
-        dispatchJob.computeJobDescriptor.srvTensors[currentTensorIndex].resource = currentResource;
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.computeJobDescriptor.srvTensors[currentTensorIndex].name,
-                pipeline->srvTensorBindings[currentTensorIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.computeJobDescriptor.srvTensors[currentTensorIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-    }
-
-    for (uint32_t currentTensorIndex = 0; currentTensorIndex < pipeline->uavTensorCount; ++currentTensorIndex)
-    {
-        const uint32_t            currentResourceId                              = pipeline->uavTensorBindings[currentTensorIndex].resourceIdentifier;
-        const FfxResourceInternal currentResource                                = context->uavResources[currentResourceId];
-        dispatchJob.computeJobDescriptor.uavTensors[currentTensorIndex].resource = currentResource;
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.computeJobDescriptor.uavTensors[currentTensorIndex].name,
-                pipeline->uavTensorBindings[currentTensorIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.computeJobDescriptor.uavTensors[currentTensorIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-    }
-
-    dispatchJob.computeJobDescriptor.dimensions[0] = dispatchX;
-    dispatchJob.computeJobDescriptor.dimensions[1] = dispatchY;
-    dispatchJob.computeJobDescriptor.dimensions[2] = 1;
-    dispatchJob.computeJobDescriptor.pipeline      = *pipeline;
-
-    for (uint32_t currentRootConstantIndex = 0; currentRootConstantIndex < pipeline->constCount; ++currentRootConstantIndex)
-    {
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.computeJobDescriptor.cbNames[currentRootConstantIndex],
-                pipeline->constantBufferBindings[currentRootConstantIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.computeJobDescriptor.cbNames[currentRootConstantIndex][FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-        dispatchJob.computeJobDescriptor.cbs[currentRootConstantIndex] =
-            context->constantBuffers[pipeline->constantBufferBindings[currentRootConstantIndex].resourceIdentifier];
-    }
-
-    FFX_ASSERT(context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &dispatchJob) == FFX_OK);
-}
-
-static void scheduleFragmentMVHints(
-    OpticalFlowContext_Private* context, const FfxPipelineState* pipeline, uint32_t width, uint32_t height, const char* debugName)
-{
-    FfxFragmentJobDescription jobDescriptor = {};
-
-    for (uint32_t currentShaderResourceViewIndex = 0; currentShaderResourceViewIndex < pipeline->srvTextureCount; ++currentShaderResourceViewIndex)
-    {
-        const uint32_t            currentResourceId                        = pipeline->srvTextureBindings[currentShaderResourceViewIndex].resourceIdentifier;
-        const FfxResourceInternal currentResource                          = context->srvResources[currentResourceId];
+        const uint32_t bindingIdentifier = pipeline->srvTextureBindings[currentShaderResourceViewIndex].resourceIdentifier;
+        const FfxResourceInternal currentResource = context->srvBindings[bindingIdentifier];
         jobDescriptor.srvTextures[currentShaderResourceViewIndex].resource = currentResource;
 #ifdef FFX_DEBUG
-        strncpy(jobDescriptor.srvTextures[currentShaderResourceViewIndex].name,
-                pipeline->srvTextureBindings[currentShaderResourceViewIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        jobDescriptor.srvTextures[currentShaderResourceViewIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        strncpy(jobDescriptor.srvTextures[currentShaderResourceViewIndex].name, pipeline->srvTextureBindings[currentShaderResourceViewIndex].name, FFX_RESOURCE_NAME_SIZE - 1); jobDescriptor.srvTextures[currentShaderResourceViewIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
 #endif
+
+        FFX_ASSERT(bindingIdentifier != FFX_OF_BINDING_IDENTIFIER_NULL);
+        FFX_ASSERT(bindingIdentifier < FFX_OF_BINDING_IDENTIFIER_COUNT);
     }
 
-    for (uint32_t currentUnorderedAccessViewIndex = 0; currentUnorderedAccessViewIndex < pipeline->uavTextureCount; ++currentUnorderedAccessViewIndex)
-    {
-        const uint32_t currentResourceId = pipeline->uavTextureBindings[currentUnorderedAccessViewIndex].resourceIdentifier;
-#ifdef FFX_DEBUG
-        strncpy(jobDescriptor.uavTextures[currentUnorderedAccessViewIndex].name,
-                pipeline->uavTextureBindings[currentUnorderedAccessViewIndex].name,
-                FFX_RESOURCE_NAME_SIZE - 1);
-        jobDescriptor.uavTextures[currentUnorderedAccessViewIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
+    for (uint32_t currentUnorderedAccessViewIndex = 0; currentUnorderedAccessViewIndex < pipeline->uavTextureCount; ++currentUnorderedAccessViewIndex) {
 
-        const FfxResourceInternal currentResource                           = context->uavResources[currentResourceId];
+        const uint32_t bindingIdentifier = pipeline->uavTextureBindings[currentUnorderedAccessViewIndex].resourceIdentifier;
+        const FfxResourceInternal currentResource = context->uavBindings[bindingIdentifier];
         jobDescriptor.uavTextures[currentUnorderedAccessViewIndex].resource = currentResource;
-        jobDescriptor.uavTextures[currentUnorderedAccessViewIndex].mip      = 0;
-    }
-
-    jobDescriptor.viewport[0] = width;
-    jobDescriptor.viewport[1] = height;
-    jobDescriptor.pipeline    = *pipeline;
-
-    for (uint32_t currentRTIndex = 0; currentRTIndex < pipeline->rtCount; ++currentRTIndex)
-    {
-        const uint32_t            currentResourceId       = pipeline->rtBindings[currentRTIndex].resourceIdentifier;
-        const FfxResourceInternal currentResource         = context->uavResources[currentResourceId];
-        jobDescriptor.rtTextures[currentRTIndex].resource = currentResource;
+        jobDescriptor.uavTextures[currentUnorderedAccessViewIndex].mip = 0;
 #ifdef FFX_DEBUG
-        strncpy(jobDescriptor.rtTextures[currentRTIndex].name, pipeline->rtBindings[currentRTIndex].name, FFX_RESOURCE_NAME_SIZE - 1);
-        jobDescriptor.rtTextures[currentRTIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        strncpy(jobDescriptor.uavTextures[currentUnorderedAccessViewIndex].name, pipeline->uavTextureBindings[currentUnorderedAccessViewIndex].name, FFX_RESOURCE_NAME_SIZE - 1); jobDescriptor.uavTextures[currentUnorderedAccessViewIndex].name[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
 #endif
-    }
 
-    for (uint32_t currentRootConstantIndex = 0; currentRootConstantIndex < pipeline->constCount; ++currentRootConstantIndex)
-    {
+        FFX_ASSERT(bindingIdentifier != FFX_OF_BINDING_IDENTIFIER_NULL);
+        FFX_ASSERT(bindingIdentifier < FFX_OF_BINDING_IDENTIFIER_COUNT);
+    }
+    
+    jobDescriptor.dimensions[0] = dispatchX;
+    jobDescriptor.dimensions[1] = dispatchY;
+    jobDescriptor.dimensions[2] = dispatchZ;
+    jobDescriptor.pipeline = *pipeline;
+
+    for (uint32_t currentRootConstantIndex = 0; currentRootConstantIndex < pipeline->constCount; ++currentRootConstantIndex) {
 #ifdef FFX_DEBUG
-        strncpy(jobDescriptor.cbNames[currentRootConstantIndex], pipeline->constantBufferBindings[currentRootConstantIndex].name, FFX_RESOURCE_NAME_SIZE - 1);
-        jobDescriptor.cbNames[currentRootConstantIndex][FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        strncpy(jobDescriptor.cbNames[currentRootConstantIndex], pipeline->constantBufferBindings[currentRootConstantIndex].name, FFX_RESOURCE_NAME_SIZE - 1); jobDescriptor.cbNames[currentRootConstantIndex][FFX_RESOURCE_NAME_SIZE - 1] = '\0';
 #endif
         jobDescriptor.cbs[currentRootConstantIndex] = context->constantBuffers[pipeline->constantBufferBindings[currentRootConstantIndex].resourceIdentifier];
     }
 
-    FfxGpuJobDescription dispatchJob = {FFX_GPU_JOB_FRAGMENT};
-    if (debugName != nullptr)
-    {
-#ifdef FFX_DEBUG
-        strncpy(dispatchJob.jobLabel, debugName, FFX_RESOURCE_NAME_SIZE - 1);
-        dispatchJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
-#endif
-    }
-    dispatchJob.fragmentJobDescriptor = jobDescriptor;
+    FfxGpuJobDescription dispatchJob = { FFX_GPU_JOB_COMPUTE };
+    #ifdef FFX_DEBUG
+    strncpy(dispatchJob.jobLabel, pipelineName, FFX_RESOURCE_NAME_SIZE - 1); dispatchJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+    #endif
+    dispatchJob.computeJobDescriptor = jobDescriptor;
 
-    FFX_ASSERT(context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &dispatchJob) == FFX_OK);
+    context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &dispatchJob);
 }
 
-static FfxErrorCode ArmOpticalFlowDispatch(OpticalFlowContext_Private* context, const FfxOpticalFlowDispatchDescription* params)
+static FfxErrorCode dispatch(FfxOpticalflowContext_Private* context, const FfxOpticalflowDispatchDescription* params)
 {
-    // take a short cut to the command list
+    context->contextDescription.backendInterface.fpRegisterResource(
+        &context->contextDescription.backendInterface,
+        &params->opticalFlowVector,
+        context->effectContextId,
+        &context->uavBindings[FFX_OF_BINDING_IDENTIFIER_SHARED_OPTICAL_FLOW_VECTOR]);
+    context->contextDescription.backendInterface.fpRegisterResource(
+        &context->contextDescription.backendInterface,
+        &params->opticalFlowSCD,
+        context->effectContextId,
+        &context->uavBindings[FFX_OF_BINDING_IDENTIFIER_SHARED_OPTICAL_FLOW_SCD_OUTPUT]);
+
+    context->contextDescription.backendInterface.fpRegisterResource(
+        &context->contextDescription.backendInterface,
+        &params->color,
+        context->effectContextId,
+        &context->srvBindings[FFX_OF_BINDING_IDENTIFIER_INPUT_COLOR]);
+
     FfxCommandList commandList = params->commandList;
+    int advancedAlgorithmIterations = 7;
+    uint32_t opticalFlowBlockSize = 8;
 
-    // Input: register color resource
-    context->contextDescription.backendInterface.fpRegisterResource(&context->contextDescription.backendInterface,
-                                                                    &params->color,
-                                                                    context->effectContextId,
-                                                                    &context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COLOR]);
+    if (context->refreshPipelineStates) {
 
-    // Input: register depth resource
-    context->contextDescription.backendInterface.fpRegisterResource(&context->contextDescription.backendInterface,
-                                                                    &params->depth,
-                                                                    context->effectContextId,
-                                                                    &context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_DEPTH]);
+        context->refreshPipelineStates = false;
 
-    // Input: register depthtm1 resource
-    context->contextDescription.backendInterface.fpRegisterResource(&context->contextDescription.backendInterface,
-                                                                    &params->depthTm1,
-                                                                    context->effectContextId,
-                                                                    &context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_DEPTH]);
+        const FfxErrorCode errorCode = createPipelineStates(context);
+        FFX_RETURN_ON_ERROR(errorCode == FFX_OK, errorCode);
+    }
 
-    // Input: register colortm1 resource
-    context->contextDescription.backendInterface.fpRegisterResource(&context->contextDescription.backendInterface,
-                                                                    &params->colorTm1,
-                                                                    context->effectContextId,
-                                                                    &context->srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_COLOR]);
+    const FfxResourceDescription resourceDescInputColor = context->contextDescription.backendInterface.fpGetResourceDescription(
+        &context->contextDescription.backendInterface,
+        context->srvBindings[FFX_OF_BINDING_IDENTIFIER_INPUT_COLOR]);
+    FFX_ASSERT(resourceDescInputColor.type == FFX_RESOURCE_TYPE_TEXTURE2D);
 
-    // Output: register output optical flow vector
-    context->contextDescription.backendInterface.fpRegisterResource(&context->contextDescription.backendInterface,
-                                                                    &params->opticalFlowVector,
-                                                                    context->effectContextId,
-                                                                    &context->uavResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_RESULT]);
+    context->constants.backbufferTransferFunction = params->backbufferTransferFunction;
+    context->constants.minMaxLuminance[0] = params->minMaxLuminance.x;
+    context->constants.minMaxLuminance[1] = params->minMaxLuminance.y;
 
-    // On first execution or reset, clear previous depth buffers
-    if (params->reset)
+    const bool resetAccumulation = params->reset || context->firstExecution;
+    context->firstExecution = false;
+
+    if (resetAccumulation) {
+        context->constants.frameIndex = 0;
+    }
+    else {
+        context->constants.frameIndex++;
+    }
+
+    if (resetAccumulation)
     {
-        FfxGpuJobDescription clearJob = {FFX_GPU_JOB_CLEAR_FLOAT};
-        const float          clearValuesToZeroFloat[]{0.f, 0.f, 0.f, 0.f};
+        const float clearValuesToZeroFloat[]{ 0.f, 0.f, 0.f, 0.f };
+        FfxGpuJobDescription clearJob = { FFX_GPU_JOB_CLEAR_FLOAT };
         memcpy(clearJob.clearJobDescriptor.color, clearValuesToZeroFloat, 4 * sizeof(float));
 
-        constexpr uint32_t resources_to_clear[] = {FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_DEPTH, FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_COLOR};
-        for (uint32_t i = 0; i < FFX_COUNTOF(resources_to_clear); ++i)
-        {
-            clearJob.clearJobDescriptor.target = context->srvResources[resources_to_clear[i]];
-            FFX_VALIDATE(context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob));
-        }
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow SCD Temp", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_TEMP];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        clearJob.clearJobDescriptor.target = context->uavBindings[FFX_OF_BINDING_IDENTIFIER_SHARED_OPTICAL_FLOW_SCD_OUTPUT];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow SCD Histogram", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_HISTOGRAM];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow SCD Previous histogram", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 1", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 1 Level 1", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_1];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 1 Level 2", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_2];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 1 Level 3", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_3];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 1 Level 4", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_4];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 1 Level 5", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_5];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 1 Level 6", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_6];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 2", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 2 Level 1", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_1];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 2 Level 2", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_2];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 2 Level 3", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_3];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 2 Level 4", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_4];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 2 Level 5", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_5];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
+        #ifdef FFX_DEBUG
+        strncpy(clearJob.jobLabel, "Clear Optical Flow Input 2 Level 6", FFX_RESOURCE_NAME_SIZE - 1); clearJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        clearJob.clearJobDescriptor.target = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_6];
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &clearJob);
     }
 
-    // Compute MV hints from depth and copy resources for next frame use
+    uint32_t resolutionMultiplier = 1;
+
+    FfxUInt32x2 threadGroupSizeOpticalFlowInputPyramid;
+    FfxUInt32x2 workGroupOffset;
+    FfxUInt32x2 numWorkGroupsAndMips;
+    FfxUInt32x4 rectInfo = { 0, 0,
+        context->contextDescription.resolution.width * resolutionMultiplier,
+        context->contextDescription.resolution.height * resolutionMultiplier };
+    ffxSpdSetup(threadGroupSizeOpticalFlowInputPyramid, workGroupOffset, numWorkGroupsAndMips, rectInfo, 4);
+
+    OpticalFlowSpdConstants luminancePyramidConstants;
+    luminancePyramidConstants.numworkGroups = numWorkGroupsAndMips[0];
+    luminancePyramidConstants.mips = numWorkGroupsAndMips[1];
+    luminancePyramidConstants.workGroupOffset[0] = workGroupOffset[0];
+    luminancePyramidConstants.workGroupOffset[1] = workGroupOffset[1];
+    luminancePyramidConstants.numworkGroupsOpticalFlowInputPyramid = numWorkGroupsAndMips[0];
+
+    context->contextDescription.backendInterface.fpStageConstantBufferDataFunc(&context->contextDescription.backendInterface, &context->constants,        sizeof(context->constants),        &context->constantBuffers[FFX_OPTICALFLOW_CONSTANTBUFFER_IDENTIFIER]);
+    context->contextDescription.backendInterface.fpStageConstantBufferDataFunc(&context->contextDescription.backendInterface, &luminancePyramidConstants, sizeof(luminancePyramidConstants), &context->constantBuffers[FFX_OPTICALFLOW_CONSTANTBUFFER_IDENTIFIER_SPD]);
+
     {
-        // Set constant buffer for MV hints computation
-        const FfxDimensions2D depthResolution{params->depthTm1.description.width, params->depthTm1.description.height};
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_HISTOGRAM] = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_HISTOGRAM];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM] = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_TEMP] = context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_SCD_TEMP];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_OUTPUT] = context->uavBindings[FFX_OF_BINDING_IDENTIFIER_SHARED_OPTICAL_FLOW_SCD_OUTPUT];
 
-        context->computeMVHintsConstants.output_dims[0]    = context->opticalFlowSize.width;
-        context->computeMVHintsConstants.output_dims[1]    = context->opticalFlowSize.height;
-        context->computeMVHintsConstants.depth_size[0]     = depthResolution.width;
-        context->computeMVHintsConstants.depth_size[1]     = depthResolution.height;
-        context->computeMVHintsConstants.depth_size_rcp[0] = 1.0f / (float)depthResolution.width;
-        context->computeMVHintsConstants.depth_size_rcp[1] = 1.0f / (float)depthResolution.height;
-        context->computeMVHintsConstants.color_size[0]     = params->color.description.width;
-        context->computeMVHintsConstants.color_size[1]     = params->color.description.height;
+        const bool isOddFrame = !!(context->resourceFrameIndex & 1);
 
-        // Calculate reprojection matrix TM1 -> TP1 (previous to current)
-        FfxFloat32x4x4 invViewProjTM1;
-        MatrixInvert4x4(context->lastFrameViewProjection, invViewProjTM1);
-        MatrixMul4x4(params->viewProjection, invViewProjTM1, context->computeMVHintsConstants.motion_matrix_m1p1);
+        uint32_t opticalFlowInputResourceIndex = isOddFrame ? FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2 : FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1;
+        uint32_t opticalFlowPreviousInputResourceIndex = isOddFrame ? FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1 : FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2;
 
-        // Stage constant buffer
-        FFX_VALIDATE(
-            context->contextDescription.backendInterface.fpStageConstantBufferDataFunc(&context->contextDescription.backendInterface,
-                                                                                       &context->computeMVHintsConstants,
-                                                                                       sizeof(context->computeMVHintsConstants),
-                                                                                       &context->constantBuffers[FFX_OPTICALFLOW_CONSTANTBUFFER_IDENTIFIER]));
+        uint32_t opticalFlowResourceIndex = isOddFrame ? FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2 : FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1;
+        uint32_t opticalFlowPreviousResourceIndex = isOddFrame ? FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1 : FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2;
 
-        if (context->useMVHintsFragment)
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT] = context->resources[opticalFlowInputResourceIndex];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_1] = context->resources[opticalFlowInputResourceIndex + 1];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_2] = context->resources[opticalFlowInputResourceIndex + 2];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_3] = context->resources[opticalFlowInputResourceIndex + 3];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_4] = context->resources[opticalFlowInputResourceIndex + 4];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_5] = context->resources[opticalFlowInputResourceIndex + 5];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_6] = context->resources[opticalFlowInputResourceIndex + 6];
+
+        context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT] = context->resources[opticalFlowInputResourceIndex];
+        context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS_INPUT] = context->resources[opticalFlowPreviousInputResourceIndex];
+
+        context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW] = context->resources[opticalFlowResourceIndex];
+        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW] = context->resources[opticalFlowResourceIndex];
+        context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS] = context->resources[opticalFlowPreviousResourceIndex];
+
         {
-            // Fragment path: dispatch at OF dims (the MV hints render target size)
-            scheduleFragmentMVHints(
-                context, &context->pipelineFragmentMVHints, context->opticalFlowSize.width, context->opticalFlowSize.height, "ArmOF_MVHints");
+            int32_t threadGroupSizeX = 16;
+            int32_t threadGroupSizeY = 16;
+            uint32_t threadPixelsX = 2;
+            uint32_t threadPixelsY = 2;
+            int32_t dispatchX = ((context->contextDescription.resolution.width + (threadPixelsX - 1)) / threadPixelsX + (threadGroupSizeX - 1)) / threadGroupSizeX;
+            int32_t dispatchY = ((context->contextDescription.resolution.height + (threadPixelsY - 1)) / threadPixelsY + (threadGroupSizeY - 1)) / threadGroupSizeY;
+            scheduleDispatch(context, &context->pipelinePrepareLuma, "OF PrepareLuma", dispatchX, dispatchY);
         }
-        else
+
         {
-            // Compute path: dispatch at OF dims
-            uint32_t dispatchX = (context->opticalFlowSize.width + 15) / 16;
-            uint32_t dispatchY = (context->opticalFlowSize.height + 15) / 16;
-            scheduleMVHintsAndCopyResources(context, &context->pipelineComputeMVHints, dispatchX, dispatchY, "ArmOF_MVHints");
+            {
+                scheduleDispatch(context,
+                                 &context->pipelineGenerateOpticalFlowInputPyramid,
+                                 "OF GenerateOpticalFlowInputPyramid",
+                                 threadGroupSizeOpticalFlowInputPyramid[0],
+                                 threadGroupSizeOpticalFlowInputPyramid[1]
+                );
+            }
+
+            {
+                {
+                    const uint32_t threadGroupSizeX = 32;
+                    const uint32_t threadGroupSizeY = 8;
+                    const uint32_t strataWidth = (context->contextDescription.resolution.width / 4) / HistogramsPerDim;
+                    const uint32_t strataHeight = context->contextDescription.resolution.height / HistogramsPerDim;
+                    const uint32_t dispatchX = (strataWidth + threadGroupSizeX - 1) / threadGroupSizeX;
+                    const uint32_t dispatchY = 16;
+                    const uint32_t dispatchZ = HistogramsPerDim * HistogramsPerDim;
+                    scheduleDispatch(context, &context->pipelineGenerateSCDHistogram, "OF GenerateSCDHistogram", dispatchX, dispatchY, dispatchZ);
+                }
+                {
+                    const uint32_t dispatchX = HistogramsPerDim * HistogramsPerDim;
+                    const uint32_t dispatchY = HistogramShifts;
+                    scheduleDispatch(context, &context->pipelineComputeSCDDivergence, "OF ComputeSCDDivergence", dispatchX, dispatchY);
+                }
+            }
+
+            FfxDimensions2D opticalFlowTextureSizes[OpticalFlowMaxPyramidLevels];
+            const int pyramidMaxIterations = advancedAlgorithmIterations;
+            FFX_ASSERT(pyramidMaxIterations <= OpticalFlowMaxPyramidLevels);
+
+            opticalFlowTextureSizes[0] = GetOpticalFlowTextureSize(context->contextDescription.resolution, opticalFlowBlockSize);
+            for (int i = 1; i < pyramidMaxIterations; i++)
+            {
+                opticalFlowTextureSizes[i] = {
+                    (opticalFlowTextureSizes[i - 1].width + 1) / 2,
+                    (opticalFlowTextureSizes[i - 1].height + 1) / 2
+                };
+            }
+
+            for (int level = pyramidMaxIterations - 1; level >= 0; level--)
+            {
+                bool isOddLevel = !!(level & 1);
+
+                uint32_t opticalFlowInputResourceIndexA = isOddFrame ? FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2 : FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1;
+                uint32_t opticalFlowInputResourceIndexB = isOddFrame ? FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1 : FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2;
+                uint32_t opticalFlowResourceIndexA = (isOddFrame != isOddLevel) ? FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2 : FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1;
+                uint32_t opticalFlowResourceIndexB = (isOddFrame != isOddLevel) ? FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_1 : FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_2;
+                context->constants.opticalFlowPyramidLevel = level;
+                context->constants.opticalFlowPyramidLevelCount = pyramidMaxIterations;
+
+                context->contextDescription.backendInterface.fpStageConstantBufferDataFunc(&context->contextDescription.backendInterface, &context->constants, sizeof(context->constants), &context->constantBuffers[FFX_OPTICALFLOW_CONSTANTBUFFER_IDENTIFIER]);
+
+                context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT] = context->resources[opticalFlowInputResourceIndexA + level];
+                context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS_INPUT] = context->resources[opticalFlowInputResourceIndexB + level];
+                context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW] = context->resources[opticalFlowResourceIndexA + level];
+
+                context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS] = context->resources[opticalFlowResourceIndexB + level];
+
+                {
+                    const FfxUInt32 inputLumaWidth = ffxMax(context->contextDescription.resolution.width >> level, 1);
+                    const FfxUInt32 inputLumaHeight = ffxMax(context->contextDescription.resolution.height >> level, 1);
+                    std::string pipelineName = "OF " + std::to_string(level) + " Search";
+
+                    {
+                        uint32_t threadPixels = 4;
+                        FFX_ASSERT(opticalFlowBlockSize >= threadPixels);
+                        uint32_t threadGroupSizeY = 16;
+                        uint32_t threadGroupSize = 64;
+                        uint32_t dispatchX = ((inputLumaWidth + threadPixels - 1) / threadPixels * threadGroupSizeY + (threadGroupSize - 1)) / threadGroupSize;
+                        uint32_t dispatchY = (inputLumaHeight + (threadGroupSizeY - 1)) / threadGroupSizeY;
+                        scheduleDispatch(context, &context->pipelineComputeOpticalFlowAdvancedV5, pipelineName.c_str(), dispatchX, dispatchY);
+                    }
+                }
+
+                {
+                    context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS] = context->resources[opticalFlowResourceIndexA + level];
+                    context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW] = context->resources[opticalFlowResourceIndexB + level];
+                }
+
+                {
+                    if (level == 0)
+                    {
+                        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW] = context->uavBindings[FFX_OF_BINDING_IDENTIFIER_SHARED_OPTICAL_FLOW_VECTOR];
+                    }
+
+                    const uint32_t levelWidth = opticalFlowTextureSizes[level].width;
+                    const uint32_t levelHeight = opticalFlowTextureSizes[level].height;
+
+                    const uint32_t threadGroupSizeX = 16;
+                    const uint32_t threadGroupSizeY = 4;
+                    const uint32_t dispatchX = (levelWidth + threadGroupSizeX - 1) / threadGroupSizeX;
+                    const uint32_t dispatchY = (levelHeight + threadGroupSizeY - 1) / threadGroupSizeY;
+                    std::string pipelineName = "OF " + std::to_string(level) + " Filter";
+
+                    {
+                        scheduleDispatch(context, &context->pipelineFilterOpticalFlowV5, pipelineName.c_str(), dispatchX, dispatchY);
+                    }
+                }
+
+                if (level > 0)
+                {
+                    context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_ALIAS_LEVEL_1 + level - 1] = context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW];
+                }
+
+                if (level > 0)
+                {
+                    {
+                        context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW] = context->resources[opticalFlowResourceIndexB + level];
+                        context->uavBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_NEXT_LEVEL] = level > 0 ? context->resources[opticalFlowResourceIndexB + level - 1] : FfxResourceInternal{ FFX_OF_RESOURCE_IDENTIFIER_NULL };
+                    }
+
+                    FFX_ASSERT(opticalFlowBlockSize >= 2);
+                    const uint32_t nextLevelWidth = opticalFlowTextureSizes[level - 1].width;
+                    const uint32_t nextLevelHeight = opticalFlowTextureSizes[level - 1].height;
+
+                    const uint32_t threadGroupSizeX = opticalFlowBlockSize / 2;
+                    const uint32_t threadGroupSizeY = opticalFlowBlockSize / 2;
+                    const uint32_t threadGroupSizeZ = 4;
+                    const uint32_t dispatchX = (nextLevelWidth + threadGroupSizeX - 1) / threadGroupSizeX;
+                    const uint32_t dispatchY = (nextLevelHeight + threadGroupSizeY - 1) / threadGroupSizeY;
+                    const uint32_t dispatchZ = 1;
+                    std::string pipelineName = "OF " + std::to_string(level) + " Scale";
+
+                    {
+                        const uint32_t dispatchX = (nextLevelWidth + 3) / 4;
+                        const uint32_t dispatchY = (nextLevelHeight + 3) / 4;
+                        scheduleDispatch(context, &context->pipelineScaleOpticalFlowAdvancedV5, pipelineName.c_str(), dispatchX, dispatchY, dispatchZ);
+                    }
+
+                    {
+                        FfxGpuJobDescription barrierJob = {FFX_GPU_JOB_BARRIER};
+                        barrierJob.barrierDescriptor = { context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+                        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+                    }
+                }
+
+                {
+                    FfxGpuJobDescription barrierJob = {FFX_GPU_JOB_BARRIER};
+                    barrierJob.barrierDescriptor = { context->srvBindings[FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+                    context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+                }
+            }
         }
     }
 
-    // Schedule optical flow data graph with computed mv hints
-    scheduleDataGraph(context, &context->pipelineOpticalflow, params->reset);
+    {
+        FfxGpuJobDescription barrierJob = {FFX_GPU_JOB_BARRIER};
 
-    // Save current view projection for next frame
-    memcpy(context->lastFrameViewProjection, params->viewProjection, sizeof(context->lastFrameViewProjection));
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 1", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 1 Level 1", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_1], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 1 Level 2", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_2], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 1 Level 3", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_3], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 1 Level 4", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_4], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 1 Level 5", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_5], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 1 Level 6", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_1_LEVEL_6], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 2", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 2 Level 1", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_1], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 2 Level 2", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_2], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 2 Level 3", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_3], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 2 Level 4", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_4], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 2 Level 5", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_5], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+        #ifdef FFX_DEBUG
+        strncpy(barrierJob.jobLabel, "Transition Optical Flow Input 2 Level 6", FFX_RESOURCE_NAME_SIZE - 1); barrierJob.jobLabel[FFX_RESOURCE_NAME_SIZE - 1] = '\0';
+        #endif
+        barrierJob.barrierDescriptor = { context->resources[FFX_OF_RESOURCE_IDENTIFIER_OPTICAL_FLOW_INPUT_2_LEVEL_6], FFX_BARRIER_TYPE_TRANSITION, FFX_RESOURCE_STATE_COMPUTE_READ, FFX_RESOURCE_STATE_UNORDERED_ACCESS, 0};
+        context->contextDescription.backendInterface.fpScheduleGpuJob(&context->contextDescription.backendInterface, &barrierJob);
+    }
 
-    context->contextDescription.backendInterface.fpExecuteGpuJobs(&context->contextDescription.backendInterface, commandList, context->effectContextId);
+    context->resourceFrameIndex = (context->resourceFrameIndex + 1) % FFX_OPTICALFLOW_MAX_QUEUED_FRAMES;
 
-    // Release dynamic resources
+    FFX_VALIDATE(context->contextDescription.backendInterface.fpExecuteGpuJobs(&context->contextDescription.backendInterface, commandList, context->effectContextId));
+
     context->contextDescription.backendInterface.fpUnregisterResources(&context->contextDescription.backendInterface, commandList, context->effectContextId);
-
-    context->firstExecution = false;
-    // Toggle between 0 and 1 to choose the correct internal resources
-    context->resourceFrameIndex ^= 1;
 
     return FFX_OK;
 }
 
-FfxErrorCode ffxOpticalFlowContextCreate(FfxOpticalFlowContext* context, FfxOpticalFlowContextDescription* contextDescription)
+FfxErrorCode ffxOpticalflowContextCreate(FfxOpticalflowContext* context, FfxOpticalflowContextDescription* contextDescription)
 {
-    // zero context memory
-    memset(context, 0, sizeof(FfxOpticalFlowContext));
-
-    // check pointers are valid.
     FFX_RETURN_ON_ERROR(context, FFX_ERROR_INVALID_POINTER);
     FFX_RETURN_ON_ERROR(contextDescription, FFX_ERROR_INVALID_POINTER);
 
-    // validate that all callbacks are set for the interface
+    FFX_RETURN_ON_ERROR(contextDescription->backendInterface.fpGetSDKVersion, FFX_ERROR_INCOMPLETE_INTERFACE);
+    FFX_RETURN_ON_ERROR(contextDescription->backendInterface.fpGetDeviceCapabilities, FFX_ERROR_INCOMPLETE_INTERFACE);
     FFX_RETURN_ON_ERROR(contextDescription->backendInterface.fpCreateBackendContext, FFX_ERROR_INCOMPLETE_INTERFACE);
     FFX_RETURN_ON_ERROR(contextDescription->backendInterface.fpDestroyBackendContext, FFX_ERROR_INCOMPLETE_INTERFACE);
 
-    // if a scratch buffer is declared, then we must have a size
-    if (contextDescription->backendInterface.scratchBuffer)
-    {
+    if (contextDescription->backendInterface.scratchBuffer) {
+
         FFX_RETURN_ON_ERROR(contextDescription->backendInterface.scratchBufferSize, FFX_ERROR_INCOMPLETE_INTERFACE);
     }
 
-    // ensure the context is large enough for the internal context.
-    FFX_STATIC_ASSERT(sizeof(FfxOpticalFlowContext) >= sizeof(OpticalFlowContext_Private));
+    FFX_STATIC_ASSERT(sizeof(FfxOpticalflowContext) >= sizeof(FfxOpticalflowContext_Private));
 
-    // create the context.
-    OpticalFlowContext_Private* contextPrivate = (OpticalFlowContext_Private*)(context);
-    const FfxErrorCode          errorCode      = opticalFlowVkCreate(contextPrivate, contextDescription);
+    FfxOpticalflowContext_Private* contextPrivate = (FfxOpticalflowContext_Private*)(context);
+    FfxErrorCode errorCode = opticalflowCreate(contextPrivate, contextDescription);
 
     return errorCode;
 }
 
-FfxErrorCode ffxOpticalFlowContextDestroy(FfxOpticalFlowContext* context)
+FFX_API FfxErrorCode ffxOpticalflowContextGetGpuMemoryUsage(FfxOpticalflowContext* context, FfxEffectMemoryUsage* vramUsage)
+{
+    FFX_RETURN_ON_ERROR(context, FFX_ERROR_INVALID_POINTER);
+    FFX_RETURN_ON_ERROR(vramUsage, FFX_ERROR_INVALID_POINTER);
+    FfxOpticalflowContext_Private* contextPrivate = (FfxOpticalflowContext_Private*)(context);
+
+    FFX_RETURN_ON_ERROR(contextPrivate->device, FFX_ERROR_NULL_DEVICE);
+
+    FfxErrorCode errorCode = contextPrivate->contextDescription.backendInterface.fpGetEffectGpuMemoryUsage(
+        &contextPrivate->contextDescription.backendInterface, contextPrivate->effectContextId, vramUsage);
+    FFX_RETURN_ON_ERROR(errorCode == FFX_OK, errorCode);
+
+    return FFX_OK;
+}
+
+FfxErrorCode ffxOpticalflowContextDestroy(FfxOpticalflowContext* context)
 {
     FFX_RETURN_ON_ERROR(context, FFX_ERROR_INVALID_POINTER);
 
-    // destroy the context.
-    OpticalFlowContext_Private* contextPrivate = (OpticalFlowContext_Private*)(context);
-    const FfxErrorCode          errorCode      = opticalFlowVkRelease(contextPrivate);
+    FfxOpticalflowContext_Private* contextPrivate = (FfxOpticalflowContext_Private*)(context);
+    const FfxErrorCode errorCode = opticalflowRelease(contextPrivate);
+
     return errorCode;
 }
 
-FfxOpticalFlowGridSize ffxGetDefaultDataGraphOpticalFlowGridSize(FfxInterface& backendInterface)
+FFX_API bool ffxOpticalflowResourceIsNull(FfxResource resource)
 {
-    FFX_ASSERT(backendInterface.devCapInitialized);
-
-    FfxDeviceCapabilities capabilities;
-    backendInterface.fpGetDeviceCapabilities(&backendInterface, &capabilities);
-    const auto supportedSizes = capabilities.supportedOutputGridSizes;
-
-    FfxOpticalFlowGridSize defaultGridSize = FFX_OPTICAL_FLOW_GRID_SIZE_UNKNOWN;
-    if (supportedSizes & FFX_OPTICAL_FLOW_GRID_SIZE_4X4)
-    {
-        defaultGridSize = FFX_OPTICAL_FLOW_GRID_SIZE_4X4;
-    }
-    else if (supportedSizes & FFX_OPTICAL_FLOW_GRID_SIZE_8X8)
-    {
-        defaultGridSize = FFX_OPTICAL_FLOW_GRID_SIZE_8X8;
-    }
-    else if (supportedSizes & FFX_OPTICAL_FLOW_GRID_SIZE_2X2)
-    {
-        defaultGridSize = FFX_OPTICAL_FLOW_GRID_SIZE_2X2;
-    }
-    else
-    {
-        defaultGridSize = FFX_OPTICAL_FLOW_GRID_SIZE_1X1;
-    }
-
-    return defaultGridSize;
+    return resource.resource == NULL;
 }
 
-bool ffxOpticalFlowGridSizeSupported(FfxInterface& backendInterface, const FfxOpticalFlowGridSize gridSize)
-{
-    FFX_ASSERT(backendInterface.devCapInitialized);
-
-    FfxDeviceCapabilities capabilities;
-    backendInterface.fpGetDeviceCapabilities(&backendInterface, &capabilities);
-    const auto supportedSizes = capabilities.supportedOutputGridSizes;
-
-    return (gridSize & supportedSizes) != 0;
-}
-
-FfxOpticalFlowGridSize ffxOpticalFlowGetGridSize(FfxOpticalFlowContext* context)
-{
-    OpticalFlowContext_Private* contextPrivate = (OpticalFlowContext_Private*)(context);
-    const auto                  gridSize       = contextPrivate ? contextPrivate->contextDescription.gridSize : FFX_OPTICAL_FLOW_GRID_SIZE_UNKNOWN;
-    return gridSize;
-}
-
-FFX_API FfxErrorCode ffxOpticalFlowGetSharedResourceDescriptions(FfxOpticalFlowContext* context, FfxOpticalFlowSharedResourceDescriptions* SharedResources)
+FFX_API FfxErrorCode ffxOpticalflowGetSharedResourceDescriptions(FfxOpticalflowContext* context, FfxOpticalflowSharedResourceDescriptions* SharedResources)
 {
     FFX_RETURN_ON_ERROR(context, FFX_ERROR_INVALID_POINTER);
     FFX_RETURN_ON_ERROR(SharedResources, FFX_ERROR_INVALID_POINTER);
 
-    OpticalFlowContext_Private* contextPrivate = (OpticalFlowContext_Private*)(context);
-    FFX_ASSERT(contextPrivate);
+    FfxOpticalflowContext_Private* contextPrivate = (FfxOpticalflowContext_Private*)(context);
+    const FfxDimensions2D opticalFlowTextureSize = GetOpticalFlowTextureSize(contextPrivate->contextDescription.resolution, 8);
+    const FfxDimensions2D globalMotionSearchMaxDispatchSize = GetGlobalMotionSearchDispatchSize(0);
+    const uint32_t globalMotionSearchTextureWidth = 4 /* predefined slots */ + (globalMotionSearchMaxDispatchSize.width * globalMotionSearchMaxDispatchSize.height);
 
-    SharedResources->opticalFlowVector = {FFX_HEAP_TYPE_DEFAULT,
-                                          {FFX_RESOURCE_TYPE_TEXTURE2D,
-                                           FFX_SURFACE_FORMAT_R16G16_FLOAT,
-                                           contextPrivate->opticalFlowSize.width,
-                                           contextPrivate->opticalFlowSize.height,
-                                           1,
-                                           1,
-                                           FFX_RESOURCE_FLAGS_NONE,
-                                           FfxResourceUsage(FFX_RESOURCE_USAGE_UAV)},
-                                          FFX_RESOURCE_STATE_GENERIC_UAV,
-                                          "ARM_OpticalFlow_Result",
-                                          0,
-                                          {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED}};
-    SharedResources->depthTm1          = {FFX_HEAP_TYPE_DEFAULT,
-                                 {FFX_RESOURCE_TYPE_TEXTURE2D,
-                                  FFX_SURFACE_FORMAT_R32_FLOAT,
-                                  contextPrivate->contextDescription.maxRenderSize.width,
-                                  contextPrivate->contextDescription.maxRenderSize.height,
-                                  1,
-                                  1,
-                                  FFX_RESOURCE_FLAGS_NONE,
-                                  FfxResourceUsage(FFX_RESOURCE_USAGE_RENDERTARGET)},
-                                 FFX_RESOURCE_STATE_GENERIC_READ,
-                                 "ARM_DepthTm1",
-                                 0,
-                                 {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED}};
-    SharedResources->depthTm1Next      = SharedResources->depthTm1;
-    SharedResources->depthTm1Next.name = "ARM_DepthTm1_Next";
-    SharedResources->colorTm1          = {FFX_HEAP_TYPE_DEFAULT,
-                                 {FFX_RESOURCE_TYPE_TEXTURE2D,
-                                  contextPrivate->contextDescription.backBufferFormat,
-                                  contextPrivate->contextDescription.resolution.width,
-                                  contextPrivate->contextDescription.resolution.height,
-                                  1,
-                                  1,
-                                  FFX_RESOURCE_FLAGS_NONE,
-                                  FfxResourceUsage(FFX_RESOURCE_USAGE_UAV)},
-                                 FFX_RESOURCE_STATE_GENERIC_UAV,
-                                 "ARM_ColorTm1",
-                                 0,
-                                 {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED}};
+    SharedResources->opticalFlowVector = {
+        FFX_HEAP_TYPE_DEFAULT,
+        { FFX_RESOURCE_TYPE_TEXTURE2D, FFX_SURFACE_FORMAT_R16G16_SINT, opticalFlowTextureSize.width, opticalFlowTextureSize.height, 1, 1, FFX_RESOURCE_FLAGS_NONE, FFX_RESOURCE_USAGE_UAV },
+        FFX_RESOURCE_STATE_UNORDERED_ACCESS, "OPTICALFLOW_Result", 0, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} };
+
+    SharedResources->opticalFlowSCD = {
+        FFX_HEAP_TYPE_DEFAULT,
+        { FFX_RESOURCE_TYPE_TEXTURE2D, FFX_SURFACE_FORMAT_R32_UINT, 3, 1, 1, 1, FFX_RESOURCE_FLAGS_NONE, FFX_RESOURCE_USAGE_UAV },
+        FFX_RESOURCE_STATE_UNORDERED_ACCESS, "OPTICALFLOW_SCDOutput", 0, {FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED} };
+
     return FFX_OK;
 }
 
-FfxErrorCode ffxOpticalFlowContextDispatch(FfxOpticalFlowContext* context, FfxOpticalFlowDispatchDescription* dispatchParams)
+FfxErrorCode ffxOpticalflowContextDispatch(FfxOpticalflowContext* context, const FfxOpticalflowDispatchDescription* dispatchParams)
 {
     FFX_RETURN_ON_ERROR(context, FFX_ERROR_INVALID_POINTER);
     FFX_RETURN_ON_ERROR(dispatchParams, FFX_ERROR_INVALID_POINTER);
     FFX_RETURN_ON_ERROR(dispatchParams->commandList, FFX_ERROR_INVALID_POINTER);
-    FFX_RETURN_ON_ERROR(dispatchParams->color.resource != NULL, FFX_ERROR_INVALID_POINTER);
-    FFX_RETURN_ON_ERROR(dispatchParams->depth.resource != NULL, FFX_ERROR_INVALID_POINTER);
+    FFX_RETURN_ON_ERROR(!ffxOpticalflowResourceIsNull(dispatchParams->color), FFX_ERROR_INVALID_POINTER);
     FFX_RETURN_ON_ERROR(dispatchParams->color.description.type == FFX_RESOURCE_TYPE_TEXTURE2D, FFX_ERROR_INVALID_ARGUMENT);
-    FFX_RETURN_ON_ERROR(dispatchParams->opticalFlowVector.resource != NULL, FFX_ERROR_INVALID_POINTER);
-    FFX_RETURN_ON_ERROR(dispatchParams->depthTm1.resource != NULL, FFX_ERROR_INVALID_POINTER);
-    FFX_RETURN_ON_ERROR(dispatchParams->colorTm1.resource != NULL, FFX_ERROR_INVALID_POINTER);
+    FFX_RETURN_ON_ERROR(!ffxOpticalflowResourceIsNull(dispatchParams->opticalFlowVector), FFX_ERROR_INVALID_POINTER);
+    FFX_RETURN_ON_ERROR(!ffxOpticalflowResourceIsNull(dispatchParams->opticalFlowSCD), FFX_ERROR_INVALID_POINTER);
 
-    OpticalFlowContext_Private* contextPrivate = (OpticalFlowContext_Private*)(context);
+    FfxOpticalflowContext_Private* contextPrivate = (FfxOpticalflowContext_Private*)(context);
 
     FFX_RETURN_ON_ERROR(contextPrivate->device, FFX_ERROR_NULL_DEVICE);
-    FFX_RETURN_ON_ERROR(dispatchParams->color.description.width == contextPrivate->contextDescription.resolution.width, FFX_ERROR_INVALID_ARGUMENT);
-    FFX_RETURN_ON_ERROR(dispatchParams->color.description.height == contextPrivate->contextDescription.resolution.height, FFX_ERROR_INVALID_ARGUMENT);
+    FFX_RETURN_ON_ERROR(dispatchParams->color.description.width <= contextPrivate->contextDescription.resolution.width, FFX_ERROR_INVALID_ARGUMENT);
+    FFX_RETURN_ON_ERROR(dispatchParams->color.description.height <= contextPrivate->contextDescription.resolution.height, FFX_ERROR_INVALID_ARGUMENT);
 
-    const FfxErrorCode errorCode = ArmOpticalFlowDispatch(contextPrivate, dispatchParams);
+    const FfxErrorCode errorCode = dispatch(contextPrivate, dispatchParams);
     return errorCode;
 }
 
-FfxDimensions2D ffxOpticalFlowGetSize(FfxOpticalFlowContext* context)
+FFX_API FfxVersionNumber ffxOpticalflowGetEffectVersion()
 {
-    OpticalFlowContext_Private* contextPrivate = (OpticalFlowContext_Private*)(context);
-    return contextPrivate ? contextPrivate->opticalFlowSize : FfxDimensions2D{0, 0};
+    return FFX_SDK_MAKE_VERSION(FFX_OPTICALFLOW_VERSION_MAJOR, FFX_OPTICALFLOW_VERSION_MINOR, FFX_OPTICALFLOW_VERSION_PATCH);
 }

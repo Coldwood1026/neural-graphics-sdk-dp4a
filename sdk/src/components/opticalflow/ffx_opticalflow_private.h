@@ -1,59 +1,108 @@
-// SPDX-FileCopyrightText: Copyright 2025-2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
-// SPDX-License-Identifier: MIT
+// This file is part of the FidelityFX SDK.
+//
+// Copyright (C) 2024 Advanced Micro Devices, Inc.
+// 
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files(the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions :
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
 
 #pragma once
 
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_NULL                    0
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COLOR                   1
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_COLOR              2
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_DEPTH                   3
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_PREV_DEPTH              4
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COMPUTED_MOTION_VECTORS 5
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_RESULT                  6
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_DEPTH_1                 7
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_DEPTH_2                 8
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COLOR_1                 9
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COLOR_2                 10
-#define FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COUNT                   11
+#define FFX_CPU
+#include <FidelityFX/gpu/opticalflow/ffx_opticalflow_resources.h>
 
-#define FFX_OPTICALFLOW_CONSTANTBUFFER_IDENTIFIER 0
-#define FFX_OPTICALFLOW_CONSTANTBUFFER_COUNT      1
-
-struct FfxPipelineState;
-
-typedef enum OpticalFlowShaderPermutationOptions
+typedef enum OpticalFlowBindingIdentifiers
 {
-    OPTICALFLOW_SHADER_PERMUTATION_DEPTH_INVERTED    = (1 << 0),
-    OPTICALFLOW_SHADER_PERMUTATION_MV_HINTS_FRAGMENT = (1 << 1),
-} OpticalFlowShaderPermutationOptions;
+    FFX_OF_BINDING_IDENTIFIER_NULL = 0,
+    FFX_OF_BINDING_IDENTIFIER_INPUT_COLOR,
 
-typedef struct OpticalFlowComputeMVHintsConstants
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_1,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_2,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_3,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_4,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_5,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_INPUT_LEVEL_6,
+
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS_INPUT,
+
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_HISTOGRAM,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_PREVIOUS_HISTOGRAM,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_TEMP,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_SCD_OUTPUT,
+
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_NEXT_LEVEL,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_PREVIOUS,
+
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_ALIAS_LEVEL_1,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_ALIAS_LEVEL_2,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_ALIAS_LEVEL_3,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_ALIAS_LEVEL_4,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_ALIAS_LEVEL_5,
+    FFX_OF_BINDING_IDENTIFIER_OPTICAL_FLOW_ALIAS_LEVEL_6,
+
+    FFX_OF_BINDING_IDENTIFIER_SHARED_OPTICAL_FLOW_VECTOR,
+    FFX_OF_BINDING_IDENTIFIER_SHARED_OPTICAL_FLOW_SCD_OUTPUT,
+
+    FFX_OF_BINDING_IDENTIFIER_COUNT
+} OpticalFlowBindingIdentifiers;
+
+typedef enum OpticalflowShaderPermutationOptions
 {
-    float   motion_matrix_m1p1[16];
-    int32_t output_dims[2];
-    int32_t depth_size[2];
-    float   depth_size_rcp[2];
-    int32_t color_size[2];
-} OpticalFlowComputeMVHintsConstants;
+    OPTICALFLOW_SHADER_PERMUTATION_FORCE_WAVE64 = (1 <<  0),  ///< doesn't map to a define, selects different table
+    OPTICALFLOW_SHADER_PERMUTATION_ALLOW_FP16   = (1 <<  1),  ///< Enables fast math computations where possible
+    OPTICALFLOW_HDR_COLOR_INPUT                 = (1 << 2),
+} OpticalflowShaderPermutationOptions;
 
-// The private implementation of the arm data graph optical flow context.
-typedef struct OpticalFlowContext_Private
+typedef struct OpticalflowConstants
 {
-    FfxOpticalFlowContextDescription   contextDescription;
-    FfxUInt32                          effectContextId;
-    FfxDevice                          device;
-    FfxPipelineState                   pipelineOpticalflow;
-    FfxPipelineState                   pipelineComputeMVHints;
-    FfxPipelineState                   pipelineFragmentMVHints;
-    bool                               useMVHintsFragment;
-    FfxResourceInternal                srvResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COUNT];
-    FfxResourceInternal                uavResources[FFX_OPTICALFLOW_RESOURCE_IDENTIFIER_COUNT];
-    FfxConstantBuffer                  constantBuffers[FFX_OPTICALFLOW_CONSTANTBUFFER_COUNT];
-    FfxDimensions2D                    dimensions;
-    OpticalFlowComputeMVHintsConstants computeMVHintsConstants;
-    FfxFloat32x4x4                     lastFrameViewProjection;
-    FfxDimensions2D                    opticalFlowSize;
+    int32_t inputLumaResolution[2];
+    uint32_t opticalFlowPyramidLevel;
+    uint32_t opticalFlowPyramidLevelCount;
 
-    bool     firstExecution;
+    int32_t frameIndex;
+    uint32_t backbufferTransferFunction;
+    float minMaxLuminance[2];
+} OpticalflowConstants;
+
+typedef struct FfxOpticalflowContext_Private
+{
+    FfxOpticalflowContextDescription contextDescription;
+    FfxUInt32 effectContextId;
+    OpticalflowConstants constants;
+    FfxDevice device;
+    FfxDeviceCapabilities deviceCapabilities;
+
+    FfxPipelineState pipelinePrepareLuma;
+    FfxPipelineState pipelineGenerateOpticalFlowInputPyramid;
+    FfxPipelineState pipelineGenerateSCDHistogram;
+    FfxPipelineState pipelineComputeSCDDivergence;
+    FfxPipelineState pipelineComputeOpticalFlowAdvancedV5;
+    FfxPipelineState pipelineFilterOpticalFlowV5;
+    FfxPipelineState pipelineScaleOpticalFlowAdvancedV5;
+
+    FfxResourceInternal resources[FFX_OF_RESOURCE_IDENTIFIER_COUNT];
+    FfxResourceInternal srvBindings[FFX_OF_BINDING_IDENTIFIER_COUNT];
+    FfxResourceInternal uavBindings[FFX_OF_BINDING_IDENTIFIER_COUNT];
+
+    FfxConstantBuffer constantBuffers[FFX_OPTICALFLOW_CONSTANTBUFFER_COUNT];
+
+    bool firstExecution;
+    bool refreshPipelineStates;
     uint32_t resourceFrameIndex;
-} OpticalFlowContext_Private;
+} FfxOpticalflowContext_Private;

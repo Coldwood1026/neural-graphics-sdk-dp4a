@@ -20,26 +20,39 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#pragma once
+#ifndef FFX_OPTICALFLOW_FILTER_OPTICAL_FLOW_V5_H
+#define FFX_OPTICALFLOW_FILTER_OPTICAL_FLOW_V5_H
 
-#include "../ffx_shader_blobs.h"
-#include <FidelityFX/host/ffx_opticalflow.h>
-#include <stdint.h>
+void FilterOpticalFlow(FfxInt32x2 iGlobalId, FfxInt32x2 iLocalId, FfxInt32x2 iGroupId, FfxInt32 iLocalIndex)
+{
+    FfxInt32x2 tmpMV[9];
+    FfxInt32 idx = 0;
+    for (FfxInt32 xx = -1; xx < 2; xx++)
+    {
+        for (FfxInt32 yy = -1; yy < 2; yy++)
+        {
 
-#if defined(__cplusplus)
-extern "C" {
-#endif // #if defined(__cplusplus)
+            tmpMV[idx] = LoadPreviousOpticalFlow(iGlobalId + FfxInt32x2(xx, yy));
+            idx++;
+        }
+    }
 
-// Get a DX12 shader blob for the specified pass and permutation index.
-FfxErrorCode opticalflowGetPermutationBlobByIndex(
-    FfxOpticalflowPass passId,
-    uint32_t permutationOptions,
-    FfxShaderBlob* outBlob,
-    FfxShaderBlob* outVertBlob);
+    FfxUInt32  ret = 0xFFFFFFFF;
+    for (FfxInt32 i = 0; i < 9; ++i)
+    {
+        FfxUInt32 tmp = 0;
+        for (FfxInt32 j = 0; j < 9; ++j)
+        {
+            FfxInt32x2 delta = tmpMV[i] - tmpMV[j];
+            tmp = delta.x * delta.x + (delta.y * delta.y + tmp);
+        }
 
-// Check is Wave64 is requested on this permutation
-FfxErrorCode opticalflowIsWave64(uint32_t permutationOptions, bool& isWave64);
+        ret = min(((tmp) << 4) | i, ret);
+    }
 
-#if defined(__cplusplus)
+    FfxUInt32 minIdx = ret & 0xF;
+
+    StoreOpticalFlow(iGlobalId, tmpMV[minIdx]);
 }
-#endif // #if defined(__cplusplus)
+
+#endif // FFX_OPTICALFLOW_FILTER_OPTICAL_FLOW_V5_H
